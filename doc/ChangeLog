@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-14 01:23:23
+
+**`README.md`**: 「まず何ができるのか」の表直後に **AMD XDNA** の一般的な解説として外部リポジトリ **[thamada/xdna-overview](https://github.com/thamada/xdna-overview)**（本文 `main.md`・PDF 同梱）へのリンクを追加。タイトル直後に **`README.en.md`** への案内を追加。ディレクトリ構成ツリーに **`README.en.md`** を追記。「実装を読みたい人へ」の最初の項目で **`README.md` / `README.en.md`** を併記。
+
+**`README.en.md`**: 日本語 **`README.md`** と同等構成の **英語版 README** を新規追加。相互に **`README.md`** へリンク。
+
+**`doc/design.md`**: リポジトリの目的節で利用者向け入口を **`README.md` / `README.en.md`** に更新。**`補足：ドキュメント間の役割`** に **`README.en.md`** と、XDNA 背景の外部文書（**xdna-overview**）を追記。**`design.md` 更新時のチェックリスト** に README 2 言語の整合を 1 項目追加。**`ディレクトリとファイル構成`** 表にルートの **`README.md` / `README.en.md`** を追記。
+
+- **`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-14 01:18:09
 
 **`README.md`**: 冒頭で **PyTorch・TensorFlow・JAX・ONNX Runtime** 等への非依存と、**標準 C / ROCm-HIP / OpenMP / `amdxdna` ioctl** の役割を明示。ROCm/HIP が NN フレームワークではない旨を補足。**「なぜライブラリ非依存なのか」** をフォーマルに整理（理解可能性・依存の単純化・実験の自由度・参照実装としての価値。主眼は性能網羅ではなく実装の観察・改造可能性）。
