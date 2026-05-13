@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-14 03:28:55
+
+**`qwen3-8b/main-xdna2.c`**: **`print_xdna_gemv_ctrlcode_report`** を追加。`npu_open` 後に **`XDNA_FORCE_CPU`**・DRM オープン可否・**`XDNA_GEMV_DIR`**・テキスト経路 **6 形状**の **`bf16-gemv-<n>x<d>.bin`** の読み取り可否（フルパス付き）を標準出力へ一覧する。推論終了後は **NPU GEMV / CPU GEMV** 件数に加え、**すべて NPU／すべて CPU／混在**を短文で表示。コマンドライン **`--xdna-status`** / **`-X`** は GGUF パース・トークナイザ初期化・`npu_open` のみ行い当該レポート出力後に終了する（重みロード・生成なし）。
+
+**`doc/design.md`**: XDNA2 実行例（**`--xdna-status` / `-X`**）、**実行時の挙動**、**コマンドライン補足**、トラブルシューティング、**XDNA2 NPU 実装メモ**、バリアント／ファイル一覧の **`main-xdna2.c` 一行**を上記に合わせて更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-14 03:16:38
 
 **`qwen3-8b/main-xdna2.c`**: **ホスト常駐メモリ削減**を目的に、線形ウェイトをロード時に全件 **BF16 の `AMDXDNA_BO_SHMEM` に複製しない**構成へ変更。**`main-omp.c` と同様**に GGUF **mmap を参照**。埋め込みは **`emb_lookup` 相当の行単位復号**。各 **GEMV 直前**に当該行列だけを **`w_scratch_bo`（単一 BF16 SHMEM）** と **`scratch_f32`** に展開し NPU／CPU GEMV が従来どおり読む。**テキスト経路 GEMV で使うテンソル**のみから **`gemv_max_elems`** を求め VL 側の肥大テンソルはサイズ算出から除外。**`TensorInfo` 名リストは **`free_tensor_index()`** で推論開始前に解放。

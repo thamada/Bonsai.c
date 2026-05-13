@@ -2703,6 +2703,93 @@ static void print_tok(Tok *tk, int id) {
 }
 
 /* ================================================================
+ * XDNA GEMV / precompiled ctrlcode visibility
+ * ================================================================ */
+
+static void print_xdna_gemv_ctrlcode_report(const Model *m) {
+    const XdnaDev *dev = &m->npu;
+    const Config *c    = &m->cfg;
+
+    int dim    = c->dim;
+    int hidden = c->hidden_dim;
+    int qdim   = c->n_heads * c->head_dim;
+    int kv_dim = c->kv_dim;
+    int vocab  = c->vocab_size;
+
+    struct {
+        int          n, d;
+        const char  *role;
+    } shapes[] = {
+        { dim,    qdim,   "wq (attn Q)" },
+        { dim,    kv_dim, "wk / wv (attn K/V)" },
+        { qdim,   dim,    "wo (attn out)" },
+        { dim,    hidden, "gate / up (FFN in)" },
+        { hidden, dim,    "down (FFN out)" },
+        { dim,    vocab,  "lm_head (logits)" },
+    };
+
+    printf("\n=== XDNA GEMV / NPU ctrlcode status ===\n");
+    printf("XDNA_FORCE_CPU:     %s\n",
+           dev->force_cpu ? "set (NPU GEMV dispatch disabled)" : "unset");
+    printf("amdxdna DRM:        %s\n",
+           dev->have_device ? "device open, hwctx ready" : "not available (GEMV stays on host)");
+    if (dev->have_device && dev->fd >= 0)
+        printf("DRM fd:             %d\n", dev->fd);
+
+    const char *gdir = dev->gemv_dir;
+    if (gdir && gdir[0])
+        printf("XDNA_GEMV_DIR:      %s\n", gdir);
+    else
+        printf("XDNA_GEMV_DIR:      (unset — bf16-gemv-*.bin will not be found)\n");
+
+    int n_shapes = (int)(sizeof(shapes) / sizeof(shapes[0]));
+    int n_ok = 0;
+    int dir_ok = (gdir && gdir[0]);
+
+    printf("Ctrlcode files required per GEMV: bf16-gemv-<n>x<d>.bin\n");
+    for (int i = 0; i < n_shapes; i++) {
+        int n = shapes[i].n;
+        int d = shapes[i].d;
+        char path[512];
+        if (dir_ok) {
+            snprintf(path, sizeof(path), "%s/bf16-gemv-%dx%d.bin", gdir, n, d);
+            int readable = (access(path, R_OK) == 0);
+            if (readable)
+                n_ok++;
+            printf("  [%s] %6d x %-7d  %s\n",
+                   readable ? " OK " : "MISS", n, d, shapes[i].role);
+            printf("          %s\n", path);
+        } else {
+            snprintf(path, sizeof(path), "%s/bf16-gemv-%dx%d.bin",
+                     "<XDNA_GEMV_DIR>", n, d);
+            printf("  [ -- ] %6d x %-7d  %s\n", n, d, shapes[i].role);
+            printf("          %s\n", path);
+        }
+    }
+
+    printf("Interpretation:\n");
+    if (!dev->have_device || dev->force_cpu) {
+        printf("  Hardware GEMV will not run (%s). Counters after inference still show CPU GEMVs.\n",
+               dev->force_cpu ? "XDNA_FORCE_CPU" : "DRM device unavailable");
+    } else if (!dir_ok) {
+        printf("  Set XDNA_GEMV_DIR to the directory containing bf16-gemv-<n>x<d>.bin "
+               "for the shapes above.\n");
+    } else if (n_ok == n_shapes) {
+        printf("  All %d ctrlcode files are readable — each `launch_mm_bf16` will attempt "
+               "NPU execution (see \"NPU GEMV / CPU GEMV\" counts after a run).\n",
+               n_shapes);
+    } else if (n_ok == 0) {
+        printf("  No ctrlcode files matched — every GEMV will use the OpenMP CPU BF16 path "
+               "(weights are still expanded for NPU staging).\n");
+    } else {
+        printf("  Partial (%d/%d files): missing shapes fall back to CPU; "
+               "mixed NPU/CPU counts after a run indicate this.\n",
+               n_ok, n_shapes);
+    }
+    printf("========================================\n\n");
+}
+
+/* ================================================================
  * Text Generation
  * ================================================================ */
 
@@ -2743,9 +2830,22 @@ static void generate(Model *m, int *prompt, int n_prompt,
     printf("\n\n--- %d prompt tokens + %d generated tokens ---\n", n_prompt, gen);
     printf("--- %.1fs total (%.2f tok/s) ---\n", elapsed,
            (gen > 0) ? gen / elapsed : 0.0);
-    printf("--- XDNA: %llu NPU GEMV / %llu CPU GEMV submissions ---\n",
-           (unsigned long long)m->npu.npu_gemv_calls,
-           (unsigned long long)m->npu.cpu_gemv_calls);
+
+    uint64_t np = m->npu.npu_gemv_calls;
+    uint64_t cp = m->npu.cpu_gemv_calls;
+    uint64_t tot = np + cp;
+    printf("--- XDNA GEMV dispatch: %llu NPU / %llu CPU (total %llu) ---\n",
+           (unsigned long long)np, (unsigned long long)cp, (unsigned long long)tot);
+    if (tot > 0) {
+        if (np == 0ULL)
+            printf("--- XDNA: no NPU GEMVs executed — check startup ctrlcode report, "
+                   "DRM permissions, XDNA_FORCE_CPU, and bf16-gemv-*.bin ---\n");
+        else if (cp == 0ULL)
+            printf("--- XDNA: all GEMVs used the NPU ctrlcode path ---\n");
+        else
+            printf("--- XDNA: mixed NPU + CPU GEMVs (missing ctrlcode shapes, "
+                   "or NPU submit/sync failure for some calls) ---\n");
+    }
 }
 
 /* ================================================================
@@ -2762,7 +2862,14 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  -k <topp>     Top-p sampling (default: 0.8)\n");
         fprintf(stderr, "  -s <seed>     Random seed (default: time)\n");
         fprintf(stderr, "  -l <len>      Max sequence length (default: 512)\n");
+        fprintf(stderr, "  --xdna-status | -X   Print DRM + GEMV ctrlcode probe, then exit\n");
         return 1;
+    }
+
+    int xdna_status_only = 0;
+    for (int ai = 2; ai < argc; ai++) {
+        if (!strcmp(argv[ai], "--xdna-status") || !strcmp(argv[ai], "-X"))
+            xdna_status_only = 1;
     }
 
     char *model_path = argv[1];
@@ -2826,12 +2933,18 @@ int main(int argc, char *argv[]) {
         printf("       firmware %u.%u.%u (build %u)\n",
                model.npu.fw_major, model.npu.fw_minor,
                model.npu.fw_patch, model.npu.fw_build);
-        if (model.npu.gemv_dir)
-            printf("       GEMV ctrlcode directory: %s\n", model.npu.gemv_dir);
-        else
-            printf("       NB: XDNA_GEMV_DIR is unset — GEMV will run on CPU fallback\n");
     } else {
         printf("XDNA2: NPU device unavailable; running fully on CPU OpenMP fallback\n");
+    }
+
+    print_xdna_gemv_ctrlcode_report(&model);
+
+    if (xdna_status_only) {
+        free_tensor_index(&model);
+        npu_close(&model.npu);
+        munmap(model.fdata, model.fsz);
+        close(model.fd);
+        return 0;
     }
 
     load_weights_xdna(&model);
