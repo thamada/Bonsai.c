@@ -894,7 +894,7 @@ static inline uint16_t host_f32f16(float f) {
         } else {
             man = (man | 0x800000u) >> (1 - exp);
             uint32_t rnd = (man & 0x1000u) ? 1u : 0u;
-            h = (uint16_t)(sgn | (man >> 13) + rnd);
+            h = (uint16_t)(sgn | ((man >> 13) + rnd));
         }
     } else {
         uint32_t rnd = (man & 0x1000u) ? 1u : 0u;
