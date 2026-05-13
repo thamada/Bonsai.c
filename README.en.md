@@ -1,5 +1,7 @@
 # Qwen3.c
 
+This repository is an **inference implementation** that runs **Qwen3-family models** directly from **a single C source**, **without relying on external libraries**.
+
 **This project does not link userland ML libraries or runtimes such as PyTorch, TensorFlow, JAX, or ONNX Runtime.** Inference is built around **standard C and `libm`**, with one or a few sources under `qwen3-8b/`. The GPU build uses **ROCm/HIP** (`hipcc`), CPU parallelism uses **OpenMP**, and the XDNA2 NPU build talks to the **Linux kernel `amdxdna` DRM ioctl (UAPI)** directly—there is no dependency on a Python runtime or `torch`.
 
 Among the above, ROCm/HIP is AMD’s GPU compiler and runtime; it is **not a high-level neural network framework** (this repo builds the Transformer from custom HIP kernels and host code).

@@ -2,6 +2,8 @@
 
 英語版は [README.en.md](README.en.md) を参照してください。
 
+本リポジトリは、**ライブラリに依存せず、単一の C 言語ソースから Qwen3 系モデルを直接動かす推論実装**です。
+
 **PyTorch・TensorFlow・JAX・ONNX Runtime など、機械学習向けのユーザランドライブラリ／ランタイムは一切リンクしていません。** 推論は **標準 C と `libm`** を中心に、`qwen3-8b/` 内の単一〜少数ソースで完結します。GPU 版は **ROCm/HIP**（`hipcc`）、CPU 並列は **OpenMP**、XDNA2 NPU 版は **Linux カーネルの `amdxdna` DRM ioctl（UAPI）** を直接叩く構成であり、Python ランタイムや `torch` に依存するレイヤはありません。
 
 上記のうち ROCm/HIP は AMD GPU 向けのコンパイラ・ランタイムであり、**ニューラルネット用の高レベルフレームワークではありません**（ここからさらに自作の HIP カーネルとホストコードで Transformer を組み立てています）。
