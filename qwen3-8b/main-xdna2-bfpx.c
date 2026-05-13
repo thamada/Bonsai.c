@@ -2312,6 +2312,17 @@ typedef struct {
     uint32_t insn_size;
 } GemvKernel;
 
+#define XDNA_GEMV_STUB_MAGIC "GQF3XDNA"
+
+static int xdna_gemv_bin_is_repo_stub(const uint8_t *hdr, size_t nbytes) {
+    if (nbytes < 16) return 0;
+    if (memcmp(hdr, XDNA_GEMV_STUB_MAGIC, 8) != 0) return 0;
+    uint32_t ver, flags;
+    memcpy(&ver, hdr + 8, 4);
+    memcpy(&flags, hdr + 12, 4);
+    return ver == 1u && (flags & 1u);
+}
+
 static int load_gemv_kernel(XdnaDev *dev, int n, int d, GemvKernel *out) {
     memset(out, 0, sizeof(*out));
     if (dev->fd < 0 || !dev->gemv_dir) return -1;
@@ -2320,6 +2331,12 @@ static int load_gemv_kernel(XdnaDev *dev, int n, int d, GemvKernel *out) {
     snprintf(path, sizeof(path), "%s/bf16-gemv-%dx%d.bin", dev->gemv_dir, n, d);
     int kfd = open(path, O_RDONLY);
     if (kfd < 0) return -1;
+    uint8_t peek[64];
+    ssize_t pn = pread(kfd, peek, sizeof(peek), 0);
+    if (pn >= 16 && xdna_gemv_bin_is_repo_stub(peek, (size_t)pn)) {
+        close(kfd);
+        return -1;
+    }
     struct stat st;
     if (fstat(kfd, &st) < 0) { close(kfd); return -1; }
     size_t sz = (size_t)st.st_size;

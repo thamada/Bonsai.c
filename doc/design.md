@@ -61,6 +61,7 @@
 | `build.omp` / `run.omp` | `qwen3-cpu-omp` | `main-omp.c`（`-fopenmp`、`OMP_NUM_THREADS`） |
 | `build.rocm` / `run.rocm` | `qwen3-rocm` | `main-rocm.c` |
 | `build.xdna2` / `run.xdna2` | `qwen3-xdna2` | `main-xdna2.c`（`-fopenmp`。`amdxdna` カーネルモジュールが `/dev/accel/accelN` を提供） |
+| **`gen-xdna-kernels`** | （出力なし） | `tools/gen-xdna-gemv-stubs.py` で **`xdna-kernels/bf16-gemv-*.bin`** プレースホルダを再生成 |
 | **`build.xdna2.bfpx` / `run.xdna2.bfpx`** | **`qwen3-xdna2-bfpx`** | **`main-xdna2-bfpx.c`**（`-fopenmp`。NPU 経路・環境変数は `qwen3-xdna2` と同種。ホスト重みは BFPX） |
 
 ```bash
@@ -69,6 +70,7 @@ make build
 make build.omp
 make build.rocm              # hipcc・ROCm 必須
 make build.xdna2             # Linux >= 6.10 + amdxdna カーネルモジュール（XRT 不要）
+make gen-xdna-kernels        # ../xdna-kernels に bf16-gemv-* プレースホルダ生成（実 NPU ctrlcode ではない）
 make build.xdna2.bfpx        # 同上 + BFPX ホスト重み版バイナリ
 OMP_NUM_THREADS=8 ./qwen3-cpu-omp "$(MODEL)" -p "Hello" -n 4
 ```
@@ -123,8 +125,9 @@ make build.xdna2
 # ユーザを render グループに追加して /dev/accel/accel0 を開けるようにしておく
 sudo usermod -aG render "$USER"
 # 既定では NPU 行列乗算用の制御コードバイナリは XDNA_GEMV_DIR から検索する。
+# リポジトリ同梱は ../xdna-kernels のスタブ（実機では使われない）— MLIR-AIE 生成物に差し替える。
 # 未設定/未配置の場合は OpenMP CPU フォールバックに自動切り替え。
-XDNA_GEMV_DIR=./xdna-kernels ./qwen3-xdna2 path/to/model.gguf -p "Hi" -n 8
+XDNA_GEMV_DIR=../xdna-kernels ./qwen3-xdna2 path/to/model.gguf -p "Hi" -n 8
 # 強制的に NPU を使わず CPU OpenMP で実行する場合:
 XDNA_FORCE_CPU=1 ./qwen3-xdna2 path/to/model.gguf -p "Hi" -n 8
 # 上級者向け: ハードウェアコンテキストの試行値を直接上書き
@@ -149,7 +152,7 @@ make build.xdna2.bfpx
 
 **XDNA2（`qwen3-xdna2`）**: 線形ウェイトは **mmap された GGUF** を **`main-omp.c` と同様**に参照する（埋め込みは mmap 上行の量子化レイアウトからブロック単位復号）。各 **GEMV** のたび、その行列だけを **`AMDXDNA_BO_SHMEM` に確保した単一 BF16 スクラッチ**へ CPU で復号・BF16 化し、`SYNC_BO` でデバイス可視にしたうえで、入力 BF16・重み・出力への `xdna_addr` を **`ERT_START_NPU`** で `DRM_IOCTL_AMDXDNA_EXEC_CMD` に渡す構成は従来どおり。**レイヤー分の恒久 BF16 重み BO は保持しない**。RMSNorm／Qwen3 ヘッド RMSNorm／Attention 等も **CPU**。NPU が使えないときは BF16 GEMV が **OpenMP** にフォールバックする（実装どおり bit-identical）。
 
-推論開始前に **`=== XDNA GEMV / NPU ctrlcode status ===`** ブロックを標準出力へ出し、`XDNA_FORCE_CPU`・DRM オープン可否・`XDNA_GEMV_DIR`・テキスト経路で使う **6 種類の GEMV 形状**それぞれについて `bf16-gemv-<n>x<d>.bin` が **`access(R_OK)` で読めるか**とフルパスを表示する。推論後は **NPU GEMV 回数／CPU GEMV 回数**に加え、**すべて NPU／すべて CPU／混在**を短文で表示する（実際に `EXEC_CMD` が成功したかはランタイムカウントが基準）。**`--xdna-status`** または **`-X`** は GGUF パースと `npu_open` のみ行い当該レポートを出力して **終了**する（重みロード・生成ループなし）。
+推論開始前に **`=== XDNA GEMV / NPU ctrlcode status ===`** ブロックを標準出力へ出し、`XDNA_FORCE_CPU`・DRM オープン可否・`XDNA_GEMV_DIR`・テキスト経路で使う **6 種類の GEMV 形状**それぞれについて `bf16-gemv-<n>x<d>.bin` を **`[ OK ]`（実 ctrlcode）／`[STUB]`（リポジトリ同梱プレースホルダ・マジック `GQF3XDNA`）／`MISS`** で表示する（実機でロードされるのは非 STUB のみ）。推論後は **NPU GEMV 回数／CPU GEMV 回数**に加え、**すべて NPU／すべて CPU／混在**を短文で表示する（実際に `EXEC_CMD` が成功したかはランタイムカウントが基準）。**`--xdna-status`** または **`-X`** は GGUF パースと `npu_open` のみ行い当該レポートを出力して **終了**する（重みロード・生成ループなし）。**`xdna-kernels/`** の `.bin` プレースホルダの再生成はルートで `python3 tools/gen-xdna-gemv-stubs.py`、または `qwen3-8b` で `make gen-xdna-kernels`。
 
 **XDNA2 + BFPX（`qwen3-xdna2-bfpx`）**: IOCTL 系列および **チャンク BF16 GEMV（NPU 経路の枠組み）** は **`qwen3-xdna2`** と同様。ただし常駐重みは **ホストの BFPX バッファ**とし、各チャンクを BF16 に展開して SHMEM BO へステージングしてから NPU に載せる。NPU が使えないときの CPU 側は **`mm_bfpx`** が、単精度浮動小数点数の活性と BFPX 形式の重みとで一般行列ベクトル積を計算する（常に CPU のみになる場合もある）。GGUF mmap は線形～BFPX 変換の完了後に解放する。**ロード時ピーク**には GGUF 全体の mmap とフルテンソル換算の一時 F32 などが乗り、メモリを大きく使う。**`qwen3-xdna2` と出力がビット単位で完全一致するとは限らない**。量子化に加えブロック近似がある。**逐次 GEMV で BF16 へ復号する `qwen3-xdna2`** に較べてホスト側の恒久表現や誤差の立ち位置が異なるため、品質や速度の優劣はケースによる。
 
@@ -163,8 +166,6 @@ make build.xdna2.bfpx
 | `-k <topp>` | Top-p サンプリング | `0.9` |
 | `-s <seed>` | 乱数シード | `time(NULL)` |
 | `-l <len>` | 最大シーケンス長 | `512` |
-
-**補足（`qwen3-xdna2` のみ）**: コマンドラインの任意位置に **`--xdna-status`** または **`-X`** を付与すると、上記 **GEMV／ctrlcode 状態レポート**のみ出力して終了する（他オプションと併用可。モデルパスは第 1 引数のまま）。
 
 ## アーキテクチャ
 

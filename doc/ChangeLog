@@ -4,6 +4,18 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-14 04:18:35
+
+**`xdna-kernels/`**: Qwen3-VL-8B テキスト経路向け **`bf16-gemv-<n>x<d>.bin`** を **5 ファイル（64 B プレースホルダ）**として追加。先頭マジック **`GQF3XDNA`** で識別し、**ERT に載せない**（誤実行防止）。
+
+**`tools/gen-xdna-gemv-stubs.py`**: 上記スタブの生成スクリプト（出力先ディレクトリを引数で変更可）。
+
+**`qwen3-8b/Makefile`**: **`gen-xdna-kernels`** ターゲット（ルートの `xdna-kernels/` を更新）。
+
+**`qwen3-8b/main-xdna2.c` / `main-xdna2-bfpx.c`**: `load_gemv_kernel` がスタブ `.bin` を拒否。**`print_xdna_gemv_ctrlcode_report`** で **`[STUB]` / `[ OK ]` / `MISS`** を表示。解説メッセージをスタブ・部分欠けに対応。
+
+**`xdna-kernels/README.md`**, **`README.md`**, **`README.en.md`**, **`doc/design.md`**: プレースホルダと MLIR-AIE 差し替えの説明を追記。
+
 ## 2026-05-14 04:03:53
 
 **`qwen3-8b/main-xdna2.c`**: NPU 経路の `amdxdna` UAPI 適合を全面修正。

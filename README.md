@@ -308,14 +308,20 @@ make build.xdna2
 
 NPU 上で実際に高速 GEMV を回すには **MLIR-AIE / IRON ツールチェイン**で生成した BF16 GEMV 制御コードバイナリ一式が必要です。`bf16-gemv-<n>x<d>.bin` という命名で `XDNA_GEMV_DIR` 配下に配置します。未配置の場合は OpenMP BF16 GEMV にフォールバックします（**NPU 経路とこの CPU フォールバックは bit-identical**）。
 
+リポジトリ直下の **`xdna-kernels/`** には、名前とレイアウト用の **64 バイト・プレースホルダ**（マジック `GQF3XDNA`）が置いてあります。**実機の ERT には渡されません**（`--xdna-status` では `[STUB]`）。再生成はリポジトリルートで `python3 tools/gen-xdna-gemv-stubs.py`、または `cd qwen3-8b && make gen-xdna-kernels`。本番の NPU 用には MLIR-AIE 等で生成したバイナリに差し替えてください。
+
 環境変数の例: `XDNA_GEMV_DIR`（制御コード検索ディレクトリ）、`XDNA_FORCE_CPU=1`（CPU 強制）、`XDNA_NUM_COL`（列数。`CREATE_HWCTX` が EINVAL になる環境では `XDNA_NUM_COL=1` を試す）。
 
 ```bash
 # 強制的に CPU フォールバックで動かす場合
 XDNA_FORCE_CPU=1 ./qwen3-xdna2 Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf -p "Hello" -n 8
 
-# 制御コードが揃っているときは NPU 経路で実行
-XDNA_GEMV_DIR=./xdna-kernels ./qwen3-xdna2 \
+# リポジトリ同梱プレースホルダ（qwen3-8b からの相対パス）。実 NPU ctrlcode ではない。
+XDNA_GEMV_DIR=../xdna-kernels ./qwen3-xdna2 \
+  Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf --xdna-status
+
+# 制御コードが揃っているときは NPU 経路で実行（本物の .bin に差し替え後）
+XDNA_GEMV_DIR=../xdna-kernels ./qwen3-xdna2 \
   Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf -p "Hello" -n 8
 ```
 
