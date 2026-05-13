@@ -44,7 +44,7 @@
 | `qwen3-8b/main-rocm.c` | ROCm 推論（既定の HIP ビルド対象）。 |
 | `qwen3-8b/main-xdna2.c` | AMD Ryzen AI（XDNA2）NPU 推論。`amdxdna` カーネルモジュール直叩き。 |
 | `qwen3-8b/main-xdna2-bfpx.c` | 同上パイプラインだが線形重みを **BFPX（BF16 スケール + int8）** でホスト常駐、mmap は変換後解放。 |
-| `qwen3-8b/Makefile` | `build` / `build.omp` / `build.rocm` / `build.xdna2` / **`build.xdna2.bfpx`** および対応する `run.*`、`clean`。 |
+| `qwen3-8b/Makefile` | 各ソース向け **`build*` / `run*` / `clean`**。**`qwen3-*`** 出力名はレシピに直書き（**`TARGET_*` は使わない**）。上書き用 **`?=` 変数**は下記「共通」を参照（**`.PHONY` / `clean` は複数行で列挙**）。 |
 | `doc/design.md` | 本書。 |
 | `doc/ChangeLog` | 変更履歴。 |
 | `.gitignore` | バイナリ等の除外。 |
@@ -81,9 +81,13 @@ OMP_NUM_THREADS=8 ./qwen3-cpu-omp "$(MODEL)" -p "Hello" -n 4
 
 | 変数 | 意味 | 既定例 |
 |------|------|--------|
+| `CC` | C コンパイラ（CPU / OpenMP / XDNA） | `cc` |
+| `CFLAGS` | C コンパイルフラグ | `-O3 -std=c11 -Wall -Wextra -Wno-unused-parameter` |
+| `LDFLAGS` | リンクフラグ・ライブラリ | `-lm` |
 | `ROCM` | ROCm ルート | `/opt/rocm` |
 | `HIPCC` | HIP コンパイラ | `$(ROCM)/bin/hipcc` |
-| `GPU_ARCH` | `--offload-arch=` | `gfx1201` |
+| `GPU_ARCH` | `--offload-arch=`（**行末に `# …` と同書きしない**。値末尾空白で HIP が失敗することがあるので、説明は別行コメントへ） | `gfx1201` |
+| `XDNA_INCS` | `<drm/drm.h>` が標準外にあるときだけ付与する `-I…`（`build.xdna2` / `build.xdna2.bfpx`） | 未定義（空で可） |
 | `MODEL` | GGUF パス | `Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf` |
 | `PROMPT` | ユーザプロンプト文字列 | `Hello, how are you?` |
 
