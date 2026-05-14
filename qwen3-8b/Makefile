@@ -62,9 +62,9 @@ build.xdna2:
 run.xdna2: build.xdna2
 	./qwen3-xdna2 $(MODEL) -p "$(PROMPT)"
 
-# XDNA: regenerate bf16-gemv-<n>x<d>.bin stubs under ../xdna-kernels (not real NPU ctrlcode).
+# XDNA: regenerate bf16-gemv-<n>x<d>.bin stubs under ../xdna-gemv/kernels (not real NPU ctrlcode).
 gen-xdna-kernels:
-	cd .. && python3 tools/gen-xdna-gemv-stubs.py xdna-kernels
+	cd .. && python3 xdna-gemv/gen-xdna-gemv-stubs.py xdna-gemv/kernels
 
 # -----------------------------------------------------------------------------
 # AMD Ryzen AI XDNA2 NPU, low-host-RAM path

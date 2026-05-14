@@ -54,6 +54,11 @@ An 8B model on CPU is **very slow**. CPU is fine for a first smoke test; for usa
 ├── doc/
 │   ├── ChangeLog
 │   └── design.md
+├── xdna-gemv/
+│   ├── README.md
+│   ├── gen-xdna-gemv-stubs.py
+│   ├── kernels/
+│   └── toolchain/
 └── qwen3-8b/
     ├── Makefile
     ├── main.c
@@ -310,7 +315,7 @@ Produces `qwen3-xdna2`.
 
 For fast BF16 GEMV on the NPU you need **MLIR-AIE / IRON**-generated control microcode bundles, named like `bf16-gemv-<n>x<d>.bin`, under `XDNA_GEMV_DIR`. If missing, the code falls back to OpenMP BF16 GEMV on CPU (**bit-identical** with the NPU path).
 
-The repo ships **`xdna-kernels/`** with **64-byte placeholders** (magic `GQF3XDNA`). They are **not** executed on the device (`--xdna-status` shows `[STUB]`). Regenerate with `python3 tools/gen-xdna-gemv-stubs.py` from the repo root, or `make gen-xdna-kernels` from `qwen3-8b/`. Replace with real MLIR-AIE outputs for hardware GEMV.
+The repo ships **`xdna-gemv/kernels/`** with **64-byte placeholders** (magic `GQF3XDNA`). They are **not** executed on the device (`--xdna-status` shows `[STUB]`). Regenerate with `python3 xdna-gemv/gen-xdna-gemv-stubs.py xdna-gemv/kernels` from the repo root, or `make gen-xdna-kernels` from `qwen3-8b/`. Replace with real MLIR-AIE outputs for hardware GEMV.
 
 Useful env vars: `XDNA_GEMV_DIR` (search path for control blobs), `XDNA_FORCE_CPU=1` (force CPU), `XDNA_NUM_COL` (column count; try `XDNA_NUM_COL=1` if `CREATE_HWCTX` returns `EINVAL`).
 
@@ -319,11 +324,11 @@ Useful env vars: `XDNA_GEMV_DIR` (search path for control blobs), `XDNA_FORCE_CP
 XDNA_FORCE_CPU=1 ./qwen3-xdna2 Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf -p "Hello" -n 8
 
 # Repo stub placeholders (from qwen3-8b/): not real NPU ctrlcode — `--xdna-status` shows [STUB]
-XDNA_GEMV_DIR=../xdna-kernels ./qwen3-xdna2 \
+XDNA_GEMV_DIR=../xdna-gemv/kernels ./qwen3-xdna2 \
   Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf --xdna-status
 
 # With real MLIR-AIE blobs under XDNA_GEMV_DIR: NPU path
-XDNA_GEMV_DIR=../xdna-kernels ./qwen3-xdna2 \
+XDNA_GEMV_DIR=../xdna-gemv/kernels ./qwen3-xdna2 \
   Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf -p "Hello" -n 8
 ```
 
@@ -341,7 +346,7 @@ make run.xdna2 PROMPT="Short explanation in English."
 cd qwen3-8b
 make build.xdna2.bfpx
 XDNA_FORCE_CPU=1 ./qwen3-xdna2-bfpx Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf -p "Hello" -n 8
-XDNA_GEMV_DIR=./xdna-kernels ./qwen3-xdna2-bfpx \
+XDNA_GEMV_DIR=../xdna-gemv/kernels ./qwen3-xdna2-bfpx \
   Qwen_Qwen3-VL-8B-Instruct-IQ2_M.gguf -p "Hello" -n 8
 ```
 
