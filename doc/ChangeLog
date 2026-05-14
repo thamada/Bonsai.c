@@ -4,6 +4,30 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-14 13:32:53
+
+**`xdna-gemv-toolchain/README.md`**: 用語・文意の整理、です・ます調への統一、`EXEC_CMD` 表記修正など**日本語校正**。
+
+**`doc/design.md`**: ディレクトリ表の **`xdna-gemv-toolchain/README.md`** 一行を手引きの位置づけに合わせて更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-14 13:25:04
+
+**`xdna-gemv-toolchain/README.md`**: **Xilinx mlir-aie / AMD IRON / Peano / `aiecc`** の公式 README に沿った **Ubuntu／XRT／wheel／環境セットアップの具体コマンド**、IRON **`GEMV(M,K)` と `bf16-gemv-<n>x<d>.bin`** の対応、**`aiecc --aie-generate-npu-insts`** の説明、**ioctl 単体ランタイム（本リポ）と XRT 検証パスの差**、公式リンク一覧を日本語で記載。
+
+**`xdna-kernels/README.md`**: §8 に **`xdna-gemv-toolchain`** への導線（§8.2）。
+
+**`doc/design.md`**: ディレクトリ表 **`xdna-gemv-toolchain/README.md`** と **ドキュメント間の役割**、「詳細（入門）」、**XDNA2 NPU 実装メモ** に同文書参照を追加。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-14 13:13:06
+
+**`xdna-kernels/Makefile`**: **`XDNA_GEMV_BIN_URL_BASE`** の既定値を Makefile 内に記述（**`make` のみで取得を試行**）。**`help`** と **`xdna-kernels/README.md` §8.1** を追随。**`doc/design.md`** の一行説明を更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-14 04:51:57
 
 **`xdna-kernels/Makefile`**: **`XDNA_GEMV_BIN_URL_BASE`** を指定したとき **`make`** で **`bf16-gemv-*.bin`** を **5 本まとめて取得**（`curl` / `wget`）。URL 未設定時は明示エラー。**`make help`**。

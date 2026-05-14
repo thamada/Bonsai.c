@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Download bf16-gemv-<n>x<d>.bin (real NPU ctrlcode), not GQF3XDNA stubs.
 #
-# 配布元 URL の末尾は必ず「/」で終わらせ、そこに次のファイル名がそのまま置いてあること。
+# 配布ベース URL の末尾は / がなくても可（Makefile が補う）。対象ファイル名は次のとおり置くこと。
 #   bf16-gemv-4096x4096.bin
 #   bf16-gemv-4096x1024.bin
 #   bf16-gemv-4096x12288.bin
 #   bf16-gemv-12288x4096.bin
 #   bf16-gemv-4096x151936.bin
 #
-# 使用例:
-#   make XDNA_GEMV_BIN_URL_BASE='https://example.com/path/to/gemv/'
+# 既定の配布ベース URL（環境変数または make の変数代入で上書き可）。
+# 例: make XDNA_GEMV_BIN_URL_BASE=https://mirror.example.jp/gemv/
 #
-# 環境変数でも可:
-#   export XDNA_GEMV_BIN_URL_BASE='https://example.com/path/to/gemv/'
-#   make
+# Releases にアセットを載せない場合、この行の URL が 404 のままになるため、そのときは手元サーバ等へ置き換えてください。
+XDNA_GEMV_BIN_URL_BASE ?= https://github.com/thamada/Qwen3.c/releases/download/xdna-gemv-qwen3vl-8b/
 
 .DEFAULT_GOAL := all
 
@@ -35,18 +34,18 @@ all: check-url $(GEMV_BINARIES)
 help:
 	@echo '本物の ctrlcode (.bin) をまとめてダウンロードします。'
 	@echo ''
-	@echo '  make XDNA_GEMV_BIN_URL_BASE=https://配布元のベースURL/'
+	@echo '  make                           # Makefile 内の既定 URL から取得'
+	@echo '  make XDNA_GEMV_BIN_URL_BASE=URL/ # 別ミラーへ上書き'
 	@echo ''
-	@echo 'ベース URL は末尾が / で、上記 5 ファイルが PUT されている場所を指してください。'
-	@echo 'リポジトリ単体には公開ミラーが無い場合があります（ツールチェイン生成物をホストする必要があることがあります）。'
+	@echo '既定ベース URL:'
+	@echo '  $(strip $(XDNA_GEMV_BIN_URL_BASE))'
 	@echo ''
-	@echo '依存: curl または wget'
+	@echo '末尾は / がなくても可。上記 5 ファイルがその場所にあること。依存: curl または wget'
 
 check-url:
 	@if [ -z "$(strip $(XDNA_GEMV_BIN_URL_BASE))" ]; then \
-		echo >&2 'エラー: XDNA_GEMV_BIN_URL_BASE が未設定です。'; \
-		echo >&2 '  make XDNA_GEMV_BIN_URL_BASE=https://…/ … のように指定してください。'; \
-		echo >&2 '  詳細: make -f Makefile help'; \
+		echo >&2 'エラー: XDNA_GEMV_BIN_URL_BASE が空です。'; \
+		echo >&2 '  Makefile 先頭の既定 URL を復元するか、make の変数で指定してください。'; \
 		exit 1; \
 	fi
 	@if [ -z "$(CURL)" ] && [ -z "$(WGET)" ]; then \

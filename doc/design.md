@@ -47,7 +47,8 @@
 | `qwen3-8b/Makefile` | 各ソース向け **`build*` / `run*` / `clean`**。**`qwen3-*`** 出力名はレシピに直書き（**`TARGET_*` は使わない**）。上書き用 **`?=` 変数**は下記「共通」を参照（**`.PHONY` / `clean` は複数行で列挙**）。 |
 | `doc/design.md` | 本書。 |
 | `doc/ChangeLog` | 変更履歴。 |
-| `xdna-kernels/Makefile` | 公開済みミラーから **`bf16-gemv-*.bin` を `curl`/`wget` で取得**（**`XDNA_GEMV_BIN_URL_BASE`** 必須。詳細は **`xdna-kernels/README.md` §8.1**）。 |
+| `xdna-gemv-toolchain/README.md` | **NPU 用 `bf16-gemv-*.bin` を自前生成する手引き**（Xilinx **mlir-aie**／**AMD IRON**／**Peano**／**`aiecc`** の公式手順に沿ったコマンド、Qwen-VL-8B と **IRON `GEMV(M,K)`** の対応、`--aie-generate-npu-insts` と `qwen3-xdna2` 統合時の注意。日本語・ですます調）。 |
+| `xdna-kernels/Makefile` | **`bf16-gemv-*.bin` を `curl`/`wget` で一括取得**。既定の **`XDNA_GEMV_BIN_URL_BASE`** を Makefile 内に記述（上書き可）。詳細は **`xdna-kernels/README.md` §8.1**。 |
 | `xdna-kernels/README.md` | **ctrlcode**（**`bf16-gemv-<n>x<d>.bin`**）と GEMV 形状、ホスト／NPU 分担、用語ミニ辞典、スタブ **`GQF3XDNA`** と **`--xdna-status`**、8B 対応表、差し替え・再生成。**§3 で ROCm/HIP の GPU カーネルとの対比と「ユーザーが HIP のように書けるか」** の整理を含む入門。 |
 | `tools/gen-xdna-gemv-stubs.py` | **`xdna-kernels/`** のスタブ `.bin` を生成（**`qwen3-8b`** の **`make gen-xdna-kernels`** から実行）。 |
 | `.gitignore` | バイナリ等の除外。 |
@@ -147,7 +148,7 @@ make build.xdna2.bfpx
 ./qwen3-xdna2-bfpx path/to/model.gguf -p "Hi" -n 8
 ```
 
-**詳細（入門）**: **`xdna-kernels/README.md`** に **ctrlcode の定義**（ERT・Instruction Buffer・`ERT_START_NPU`）、**GEMV と** **`(n,d)`**、**GPU（ROCm/HIP）カーネルとの対比**（オーバーレイ＋ctrlcode、標準ワークフローでのユーザー主導性の違い）、公開ミラーがある場合の **`xdna-kernels/Makefile` での一括ダウンロード（README §8.1）**、各 **`bf16-gemv-<n>x<d>.bin`** と Qwen3-VL-8B の対応、スタブ **`GQF3XDNA`**、**`--xdna-status`**、プレースホルダ再生成と MLIR-AIE / IRON 生成物への差し替えを記す。
+**詳細（入門）**: **`xdna-kernels/README.md`** に **ctrlcode の定義**（ERT・Instruction Buffer・`ERT_START_NPU`）、**GEMV と** **`(n,d)`**、**GPU（ROCm/HIP）カーネルとの対比**（オーバーレイ＋ctrlcode、標準ワークフローでのユーザー主導性の違い）、公開ミラーがある場合の **`xdna-kernels/Makefile` での一括ダウンロード（README §8.1）**、**MLIR-AIE / IRON での自前ビルド手順（`xdna-gemv-toolchain/README.md`）**、各 **`bf16-gemv-<n>x<d>.bin`** と Qwen3-VL-8B の対応、スタブ **`GQF3XDNA`**、**`--xdna-status`**、プレースホルダ再生成と MLIR-AIE / IRON 生成物への差し替えを記す。
 
 ## 実行時の挙動
 
@@ -364,6 +365,7 @@ Qwen3-VL-8B の代表形状では `head_dim=128` なので、専用の `attn_fla
 - **`README.md`**: ビルド・実行・バリアント選択の手順、およびライブラリ非依存の方針とその意義の説明（日本語）。
 - **`README.en.md`**: 上記と同等の内容（英語）。
 - **`xdna-kernels/README.md`**: XDNA2 の **ctrlcode**・GEMV 形状・スタブ／実機バイナリ・**`--xdna-status`** の入門。**GPU（ROCm/HIP）カーネルとの対比**（§3）もここで扱う。
+- **`xdna-gemv-toolchain/README.md`**: **mlir-aie / IRON / Peano / `aiecc`** に沿った **NPU 用 `bf16-gemv-*.bin` 自前生成**の手引き（コマンド列と注意点。**`qwen3-xdna2` は ioctl のみで XRT 非依存**であることとの差も記載。日本語・ですます調）。
 - **`doc/design.md`（本書）**: 現行の設計・仕様。
 - **`doc/ChangeLog`**: 日付付き変更履歴。
 - **外部（参考）**: **AMD XDNA** のアーキテクチャ概要・世代・ソフトウェアスタック等は、別リポジトリ **[thamada/xdna-overview](https://github.com/thamada/xdna-overview)** にまとめてある（本リポジトリの実装説明とは独立した背景資料）。
@@ -395,7 +397,7 @@ Qwen3-VL-8B の代表形状では `head_dim=128` なので、専用の `attn_fla
 - **重みのレイアウト**: 線形層は **GGUF mmap** の量子化レイアウトを **`WeightsDev` が参照**。各 GEMV 前にだけ **単一 BF16 SHMEM (`w_scratch_bo`)** と **FP32 ステージング (`scratch_f32`)** で展開。小型の norm は mmap 指す。
 - **CPU 上の処理**: RMSNorm、Qwen3 ヘッド RMSNorm、RoPE、KV cache 書き込み、FlashAttention 相当、SwiGLU、残差加算、softmax、サンプリングをすべて OpenMP で並列化（`main-omp.c` と同じ粒度）。
 
-NPU 上で実際に高速 GEMV を回すには **MLIR-AIE / IRON** で生成した形状 `(n, d)` 専用 BF16 GEMV 制御コードバイナリが必要である。**同一ファイル名のスタブ（先頭マジック `GQF3XDNA`）はリポジトリに同梱されるが、`load_gemv_kernel` はこれをロードしない**（実機は非スタブに差し替える。**ctrlcode の全体像・GPU（ROCm/HIP）カーネルとの対比・ユーザー主導で書けるかどうか**は **`xdna-kernels/README.md`**（§0・§2・§3 ほか）参照）。バイナリ未配置などで CPU に落ちる際、**`qwen3-xdna2`** は BF16 GEMV を OpenMP で実行する（実装では NPU 経路との **bit-identical** が謳われている。**`main-xdna2.c` の先頭コメント**参照）。一方 **`qwen3-xdna2-bfpx`** は **`mm_bfpx`** であり、出力が **`qwen3-xdna2` とビット単位では一致しない**。
+NPU 上で実際に高速 GEMV を回すには **MLIR-AIE / IRON** で生成した形状 `(n, d)` 専用 BF16 GEMV 制御コードバイナリが必要である。**詳細なセットアップコマンド・`aiecc` オプション・IRON `GEMV(M,K)` とファイル名の対応**は **`xdna-gemv-toolchain/README.md`** を参照。**同一ファイル名のスタブ（先頭マジック `GQF3XDNA`）はリポジトリに同梱されるが、`load_gemv_kernel` はこれをロードしない**（実機は非スタブに差し替える。**ctrlcode の全体像・GPU（ROCm/HIP）カーネルとの対比・ユーザー主導で書けるかどうか**は **`xdna-kernels/README.md`**（§0・§2・§3 ほか）参照）。バイナリ未配置などで CPU に落ちる際、**`qwen3-xdna2`** は BF16 GEMV を OpenMP で実行する（実装では NPU 経路との **bit-identical** が謳われている。**`main-xdna2.c` の先頭コメント**参照）。一方 **`qwen3-xdna2-bfpx`** は **`mm_bfpx`** であり、出力が **`qwen3-xdna2` とビット単位では一致しない**。
 
 ### `main-xdna2-bfpx.c`（BFPX）メモ
 
