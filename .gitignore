@@ -9,5 +9,11 @@ qwen3-8b/cpu-multicore/qwen3-cpu-omp
 qwen3-8b/gpu/qwen3-rocm
 qwen3-8b/xdna2/qwen3-xdna2
 qwen3-8b/xdna2-bfp16/qwen3-xdna2-bfpx
+# 誤って qwen3-8b/ 直下に生成された古いバイナリ（無視）
+qwen3-8b/qwen3-cpu
+qwen3-8b/qwen3-cpu-omp
+qwen3-8b/qwen3-rocm
+qwen3-8b/qwen3-xdna2
+qwen3-8b/qwen3-xdna2-bfpx
 qwen3-8b/qwen3-xdna2-tiny
 qwen3-8b/qwen3-xdna2-mmap
