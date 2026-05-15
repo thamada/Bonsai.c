@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-16 02:38:57
+
+**`qwen3-8b/cpu-multicore/main.c`**: ファイル先頭コメントを **`qwen3-8b/`** 配下のパス（本ファイル・**`qwen3-8b/gpu/main.c`**）と **`make build.omp`**／**`cpu-multicore/`** 単体 **`make build`**（出力 **`qwen3-cpu-omp`**）に合わせて更新。
+
+**`doc/design.md`**: ディレクトリ表の **`qwen3-8b/cpu-multicore/main.c`** 一行を上記に追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-16 02:22:26
 
 **`xdna-gemv/toolchain/README.md`**: §0「最初にお読みください」の**日本語の推敲**（`qwen3-xdna2`／公式サンプル／Linux **AMD NPU** 文書／ACRi チュートリアルの読みやすさ）。**東京科学大学（2026年現在の名称。旧・東京工業大学）** およびマニュアル URL が **`titech.ac.jp` のまま**であることの注記を反映。

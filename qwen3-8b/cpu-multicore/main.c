@@ -1,16 +1,16 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Qwen3-VL-8B GGUF — CPU + OpenMP (main.c の並列版).
+ * qwen3-8b/cpu-multicore/main.c — Qwen3-VL-8B GGUF、CPU + OpenMP（単一ソース）。
  *
- * gpu/main.c の粒度に沿った並列化:
+ * qwen3-8b/gpu/main.c（ROCm/HIP）のカーネル粒度に沿った並列化:
  *   - GEMV: 出力行（row）方向 — hip の mm_*_gemv が 1 行ずつ独立と同じ
  *   - attn: ヘッドごと — flash / MHA カーネルが blockIdx.x = head と同様
  *   - RoPE: ヘッド並列 — rope_kernel のヘッド次元と同様
  *   - RMSNorm(全体): 2 パス（reduction + 素平行ループ）／ヘッド RMSNorm はヘッド並列
  *   - SiLU+mul・残差加算: hidden / dim を並列
  *
- * Build: make build.omp  (-fopenmp)
+ * Build: `make build` → `qwen3-cpu-omp`。
  * スレッド数: 環境変数 OMP_NUM_THREADS（未設定時は実装依存）
  */
 
