@@ -10,7 +10,9 @@ Per [Announcing 1-bit Bonsai: The First Commercially Viable 1-bit LLMs](https://
 
 **This repo loads** the Hugging Face GGUF **`Bonsai-8B-Q1_0.gguf`** (Q1_0 quantization). Scope is **text prompt in, text out**; **image input is not supported**.
 
-**This project does not link PyTorch, TensorFlow, JAX, ONNX Runtime, or other ML userland libraries.** Inference uses **standard C and `libm`** only, built from **`bonsai-8b/cpu/main.c`** into a **single-threaded CPU** binary (`bonsai-cpu`). There is no Python or `torch` dependency.
+**This project does not link PyTorch, TensorFlow, JAX, ONNX Runtime, or other ML userland libraries.**
+
+The primary path uses **standard C and `libm` only**, built from **`bonsai-8b/cpu/main.c`** into a **single-threaded CPU** binary (`bonsai-cpu`). For faster experimentation on multicore CPUs, **`bonsai-8b/cpu-omp/main.c`** builds **`bonsai-cpu-omp`**, parallelized with **OpenMP** (**standard C + `libm` + OpenMP runtime**). There is no Python or `torch` dependency.
 
 ### Why avoid ML libraries?
 
@@ -24,13 +26,14 @@ This is **not** aimed at peak performance or full feature parity.
 
 ## What you can run
 
-Only the **CPU single-thread** build is provided.
+You get a **single-thread CPU** reference build plus an optional **OpenMP multicore** build.
 
 | Mode | Source | Binary | Good for |
 |---|---|---|---|
-| CPU single-thread | `bonsai-8b/cpu/main.c` | `cpu/bonsai-cpu` | Learning the flow, minimal setup |
+| CPU single-thread | `bonsai-8b/cpu/main.c` | `cpu/bonsai-cpu` | Learning the flow, minimal dependencies |
+| CPU + OpenMP | `bonsai-8b/cpu-omp/main.c` | `cpu-omp/bonsai-cpu-omp` | Multicore speedups, heavier smoke tests |
 
-An 8B model on CPU can be **slow**. Start with a small `-n` (e.g. `-n 1`) for smoke tests.
+An 8B model on CPU stays **heavy** (`cpu-omp` still scales with cores). Start with a small `-n` (e.g. `-n 1`) for smoke tests.
 
 ## Repository layout
 
@@ -44,12 +47,15 @@ An 8B model on CPU can be **slow**. Start with a small `-n` (e.g. `-n 1`) for sm
 └── bonsai-8b/
     ├── Makefile
     ├── gguf.txt
-    └── cpu/
+    ├── cpu/
+    │   ├── Makefile
+    │   └── main.c
+    └── cpu-omp/
         ├── Makefile
         └── main.c
 ```
 
-Work mainly under `bonsai-8b/cpu/`.
+The reference decoder path lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**.
 
 ## Beginners: what happens during LLM inference?
 
@@ -69,6 +75,7 @@ Here, that pipeline is **not** inside PyTorch; you can follow it **in the C sour
 - `make`  
 - A C compiler (`gcc`, `clang`, …)  
 - `libm`  
+- For **`cpu-omp`**, a compiler/toolchain with **OpenMP** (`libgomp` or `libomp`, commonly bundled with GCC/Clang)  
 - **`Bonsai-8B-Q1_0.gguf`** from [prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)
 
 On Ubuntu-like systems:
@@ -95,7 +102,8 @@ You should then have:
 ```text
 bonsai-8b/
 ├── Makefile
-├── cpu/ … (`main.c` → `cpu/bonsai-cpu`)
+├── cpu/ … (`main.c` → `bonsai-cpu`)
+├── cpu-omp/ … (`main.c` → `bonsai-cpu-omp`)
 └── Bonsai-8B-Q1_0.gguf
 ```
 
@@ -107,6 +115,14 @@ Verify integrity using hashes published on [Hugging Face](https://huggingface.co
 cd bonsai-8b
 make build.cpu
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
+```
+
+(Optional) OpenMP build from `cpu-omp/`:
+
+```bash
+cd bonsai-8b/cpu-omp
+make build
+./bonsai-cpu-omp ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
 
 ## Build & run (CPU)
@@ -140,6 +156,40 @@ Model elsewhere:
 make run.cpu MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
 ```
 
+## Build & run (CPU + OpenMP, `cpu-omp`)
+
+Same model and CLI as `cpu`; matmul, attention, SwiGLU, etc. are parallelized with **OpenMP**.
+
+### Build
+
+```bash
+cd bonsai-8b/cpu-omp
+make build
+```
+
+Produces **`bonsai-cpu-omp`** in that directory.
+
+### Run
+
+Example with the GGUF one level up:
+
+```bash
+cd bonsai-8b/cpu-omp
+./bonsai-cpu-omp ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+Control thread count (default depends on the OpenMP runtime):
+
+```bash
+OMP_NUM_THREADS=8 ./bonsai-cpu-omp ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+The local `Makefile` `run` target defaults to **`MODEL=../Bonsai-8B-Q1_0.gguf`**:
+
+```bash
+make run PROMPT="Give a one-sentence introduction of yourself."
+```
+
 ## Common CLI options
 
 | Option | Example | Meaning |
@@ -155,6 +205,12 @@ Example:
 
 ```bash
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
+```
+
+The OpenMP build accepts the same flags:
+
+```bash
+./cpu-omp/bonsai-cpu-omp Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
 ```
 
 ## More deterministic output
@@ -174,7 +230,7 @@ cd bonsai-8b
 make clean
 ```
 
-Removes **`cpu/bonsai-cpu`**. The GGUF file is **not** deleted.
+`make clean` at `bonsai-8b/` removes **`cpu/bonsai-cpu`**. To remove **`cpu-omp/bonsai-cpu-omp`**, run `make clean` inside **`bonsai-8b/cpu-omp`**. The GGUF file is **not** deleted.
 
 ## Troubleshooting
 
@@ -192,22 +248,27 @@ ls -lh bonsai-8b/Bonsai-8B-Q1_0.gguf
 
 ### CPU is slow
 
-Expected for an 8B model on a single CPU thread. Try `-n 1` or `-n 4`:
+Expected for an 8B model on CPU. Try `-n 1` or `-n 4`, or the **`cpu-omp`** binary with **`OMP_NUM_THREADS`**:
 
 ```bash
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
 
+### OpenMP / `-fopenmp` failures
+
+Install an OpenMP-capable toolchain and runtime (`libgomp` / `libomp` per distro), then rerun `make build` in **`cpu-omp`**.
+
 ## Reading the codebase
 
 1. `README.en.md` / `README.md` — build and run  
 2. `doc/design.md` — design and quantization  
-3. `bonsai-8b/cpu/main.c` — load GGUF through one-token generation  
+3. `bonsai-8b/cpu/main.c` — GGUF load through one-token generation (single-thread baseline)  
+4. `bonsai-8b/cpu-omp/main.c` — OpenMP parallel variant  
 
 ## Out of scope
 
 - Training / fine-tuning  
-- GPU / NPU / OpenMP builds (removed from this repo)  
+- GPU / NPU stacks (CUDA, Vulkan compute, Metal, …) — no GPU build targets here  
 - Batch inference tuning  
 - Image input  
 - Server or Web API packaging  
@@ -221,4 +282,4 @@ The goal is to **understand, experiment with, and adapt** **Bonsai-8B-Q1_0** (GG
 - Design: `doc/design.md`  
 - Changelog: `doc/ChangeLog`  
 
-If something fails, check `bonsai-8b/Makefile` targets and the model path you pass at runtime.
+If something fails, check **`bonsai-8b/Makefile`** and **`bonsai-8b/cpu-omp/Makefile`** targets, plus the model path you pass at runtime.

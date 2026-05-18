@@ -10,7 +10,9 @@
 
 **本リポジトリが読み込む GGUF** は **`Bonsai-8B-Q1_0.gguf`**（Q1_0 量子化）です。**テキストのプロンプト入出力**に限定し、画像入力は扱いません。
 
-**PyTorch・TensorFlow・JAX・ONNX Runtime など、機械学習向けのユーザランドライブラリ／ランタイムは一切リンクしていません。** 推論は **標準Cと `libm`** のみで、`bonsai-8b/cpu/main.c` から **CPU 単スレッド**の実行ファイル（`bonsai-cpu`）をビルドします。Python や `torch` には依存しません。
+**PyTorch・TensorFlow・JAX・ONNX Runtime など、機械学習向けのユーザランドライブラリ／ランタイムは一切リンクしていません。**  
+推論の基準経路は **標準Cと `libm`** のみで、`bonsai-8b/cpu/main.c` から **CPU 単スレッド**の実行ファイル（`bonsai-cpu`）をビルドします。  
+より速い検証向けに、同じ GGUF に対応した **OpenMP マルチスレッド**版を `bonsai-8b/cpu-omp/main.c` から **`bonsai-cpu-omp`** として別ビルドできます（ランタイムは **標準C + `libm` + OpenMP ランタイム**）。Python や `torch` には依存しません。
 
 ### なぜライブラリ非依存なのか
 
@@ -27,13 +29,14 @@
 
 ## まず何ができるのか
 
-現状、**CPU 単スレッド**のビルドのみを提供します。
+**CPU 単スレッド**版と、そのロジックを **OpenMP** で並列化した **`cpu-omp`** 版の 2 通りがあります。
 
 | 実行方法 | 使うファイル | 作られる実行ファイル | 向いている用途 |
 |---|---|---|---|
-| CPU 単スレッド | `bonsai-8b/cpu/main.c` | `cpu/bonsai-cpu` | 仕組みを追う、最小構成で動かす |
+| CPU 単スレッド | `bonsai-8b/cpu/main.c` | `cpu/bonsai-cpu` | 仕組みを追う、最小依存で動かす |
+| CPU + OpenMP | `bonsai-8b/cpu-omp/main.c` | `cpu-omp/bonsai-cpu-omp` | マルチコアでの高速化・試運転 |
 
-8B 級モデルの CPU 単スレッド実行は **非常に重い**です。まずは `-n 1` など短い生成で動作確認してください。
+8B 級モデルの CPU 実行は依然として **非常に重い**です（`cpu-omp` でもコア数に依存）。まずは `-n 1` など短い生成で動作確認してください。
 
 ## ディレクトリ構成
 
@@ -47,12 +50,15 @@
 └── bonsai-8b/
     ├── Makefile
     ├── gguf.txt
-    └── cpu/
+    ├── cpu/
+    │   ├── Makefile
+    │   └── main.c
+    └── cpu-omp/
         ├── Makefile
         └── main.c
 ```
 
-主に触るのは **`bonsai-8b/cpu/`** です。
+推論コードは **`bonsai-8b/cpu/`**（参照・単スレッド）が基準です。並列版は **`bonsai-8b/cpu-omp/`** です。
 
 ## 初心者向け: LLM推論で何が起きるか
 
@@ -70,6 +76,7 @@
 - `make`  
 - Cコンパイラ（例: `gcc`, `clang`）  
 - `libm`  
+- **`cpu-omp`** をビルドするときは **OpenMP に対応したコンパイラ**（GCC / Clang と通常同梱の OpenMP ランタイム、`libgomp` または `libomp`）  
 - **Bonsai-8B-Q1_0.gguf**（[prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)）
 
 ```bash
@@ -94,7 +101,8 @@ wget -O Bonsai-8B-Q1_0.gguf "$url"
 ```text
 bonsai-8b/
 ├── Makefile
-├── cpu/ … （`main.c` → `cpu/bonsai-cpu`）
+├── cpu/ … （`main.c` → `bonsai-cpu`）
+├── cpu-omp/ … （`main.c` → `bonsai-cpu-omp`）
 └── Bonsai-8B-Q1_0.gguf
 ```
 
@@ -106,6 +114,14 @@ bonsai-8b/
 cd bonsai-8b
 make build.cpu
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
+```
+
+任意で OpenMP 版（別ディレクトリでビルド）:
+
+```bash
+cd bonsai-8b/cpu-omp
+make build
+./bonsai-cpu-omp ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
 
 ## CPU 単スレッド版
@@ -137,6 +153,40 @@ make run.cpu PROMPT="日本語で短く自己紹介してください。"
 make run.cpu MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
 ```
 
+## CPU OpenMP 版（`cpu-omp`）
+
+`cpu/main.c` と同じモデル・CLI を前提にし、行列積・アテンション・SwiGLU などを **OpenMP** で並列化したビルドです。
+
+### ビルド
+
+```bash
+cd bonsai-8b/cpu-omp
+make build
+```
+
+成功すると **`bonsai-cpu-omp`** がこのディレクトリにできます。
+
+### 実行
+
+リポジトリ直下のモデルがある場合:
+
+```bash
+cd bonsai-8b/cpu-omp
+./bonsai-cpu-omp ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+スレッド数は環境変数で指定できます（既定は実行環境の OpenMP に依存）。
+
+```bash
+OMP_NUM_THREADS=8 ./bonsai-cpu-omp ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+`Makefile` の `run` は既定で `MODEL=../Bonsai-8B-Q1_0.gguf` を渡します。
+
+```bash
+make run PROMPT="日本語で短く自己紹介してください。"
+```
+
 ## よく使うオプション
 
 | オプション | 例 | 意味 |
@@ -150,6 +200,12 @@ make run.cpu MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
 
 ```bash
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
+```
+
+OpenMP 版も同様のオプションです。
+
+```bash
+./cpu-omp/bonsai-cpu-omp Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
 ```
 
 ## 生成を安定させたいとき
@@ -169,7 +225,7 @@ cd bonsai-8b
 make clean
 ```
 
-削除されるのは主に **`cpu/bonsai-cpu`** です。GGUF は削除されません。
+ルートで `make clean` すると削除されるのは主に **`cpu/bonsai-cpu`** です。**`cpu-omp/bonsai-cpu-omp`** を消すときは、`bonsai-8b/cpu-omp` で `make clean` してください。GGUF は削除されません。
 
 ## よくあるトラブル
 
@@ -187,22 +243,27 @@ ls -lh bonsai-8b/Bonsai-8B-Q1_0.gguf
 
 ### CPU 版が遅い
 
-正常です。8B を単スレッド CPU で回す負荷は大きいです。`-n 1` や `-n 4` から試してください。
+正常です。8B を CPU で回す負荷は大きいです。`-n 1` や `-n 4` から試すか、`cpu-omp` 版と **`OMP_NUM_THREADS`** を試してください。
 
 ```bash
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
 
+### OpenMP がリンクできない／`-fopenmp` が通らない
+
+コンパイラと OpenMP の開発パッケージ（ディストリビューションにより `libgomp`、`libomp` など）を入れたうえで、再度 `cpu-omp` の `make build` を試してください。
+
 ## 実装を読みたい人へ
 
 1. `README.md` / `README.en.md`  
 2. `doc/design.md`  
-3. `bonsai-8b/cpu/main.c`  
+3. `bonsai-8b/cpu/main.c` — 単スレッド基準経路  
+4. `bonsai-8b/cpu-omp/main.c` — OpenMP 並列版  
 
 ## このリポジトリで扱わないもの
 
 - 学習・ファインチューニング  
-- **GPU / NPU / OpenMP** などの別実行経路（本リポジトリから削除済み）  
+- **GPU / NPU** や **CUDA / Vulkan / Metal** など GPU ランタイム向けビルド  
 - バッチ推論の最適化  
 - 画像入力  
 - サーバ化・Web API 化  
@@ -216,4 +277,4 @@ ls -lh bonsai-8b/Bonsai-8B-Q1_0.gguf
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-困ったときは、`bonsai-8b/Makefile` のターゲットと、実行時に渡しているモデルパスを確認してください。
+困ったときは、`bonsai-8b/Makefile` と **`bonsai-8b/cpu-omp/Makefile`** のターゲット、および実行時のモデルパスを確認してください。
