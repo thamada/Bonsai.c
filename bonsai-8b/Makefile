@@ -7,6 +7,7 @@ PROMPT  ?= Hello, how are you?
 .PHONY: \
 	all \
 	build.cpu run.cpu \
+	build.cpu-blas run.cpu-blas \
 	clean
 
 .DEFAULT_GOAL := all
@@ -20,8 +21,17 @@ run.cpu: build.cpu
 	./cpu/bonsai-cpu "$(MODEL)" -p "$(PROMPT)"
 
 # -----------------------------------------------------------------------------
+# CPU + OpenMP + OpenBLAS（ソースは cpu-blas/main.c）
+build.cpu-blas:
+	cd cpu-blas && make build
+
+run.cpu-blas: build.cpu-blas
+	./cpu-blas/bonsai-cpu-blas "$(MODEL)" -p "$(PROMPT)"
+
+# -----------------------------------------------------------------------------
 all: build.cpu
 
 # -----------------------------------------------------------------------------
 clean:
 	cd cpu && make clean
+	cd cpu-blas && make clean
