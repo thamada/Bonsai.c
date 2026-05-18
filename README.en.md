@@ -12,7 +12,8 @@ Per [Announcing 1-bit Bonsai: The First Commercially Viable 1-bit LLMs](https://
 
 **This project does not link PyTorch, TensorFlow, JAX, ONNX Runtime, or other ML userland libraries.**
 
-The primary path uses **standard C and `libm` only**, built from **`bonsai-8b/cpu/main.c`** into a **single-threaded CPU** binary (`bonsai-cpu`). For faster experimentation on multicore CPUs, **`bonsai-8b/cpu-omp/main.c`** builds **`bonsai-cpu-omp`**, parallelized with **OpenMP** (**standard C + `libm` + OpenMP runtime**). There is no Python or `torch` dependency.
+The primary path uses **standard C and `libm` only**, built from **`bonsai-8b/cpu/main.c`** into a **single-threaded CPU** binary (`bonsai-cpu`). For faster experimentation on multicore CPUs, **`bonsai-8b/cpu-omp/main.c`** builds **`bonsai-cpu-omp`**, parallelized with **OpenMP** (**standard C + `libm` + OpenMP runtime**).  
+For practical throughput on **`Bonsai-8B-Q1_0`**, **`bonsai-8b/cpu-blas/`** builds **`bonsai-cpu-blas`** with **OpenMP + OpenBLAS** and a **fused Q1_0 dot-product kernel** (**standard C + `libm` + OpenMP + OpenBLAS**). There is no Python or `torch` dependency.
 
 ### Why avoid ML libraries?
 
@@ -26,14 +27,15 @@ This is **not** aimed at peak performance or full feature parity.
 
 ## What you can run
 
-You get a **single-thread CPU** reference build plus an optional **OpenMP multicore** build.
+You get a **single-thread CPU** reference build, an **OpenMP multicore** build, and an **OpenMP + OpenBLAS** optimized build.
 
 | Mode | Source | Binary | Good for |
 |---|---|---|---|
 | CPU single-thread | `bonsai-8b/cpu/main.c` | `cpu/bonsai-cpu` | Learning the flow, minimal dependencies |
-| CPU + OpenMP | `bonsai-8b/cpu-omp/main.c` | `cpu-omp/bonsai-cpu-omp` | Multicore speedups, heavier smoke tests |
+| CPU + OpenMP | `bonsai-8b/cpu-omp/main.c` | `cpu-omp/bonsai-cpu-omp` | Multicore smoke tests (reference) |
+| CPU + OpenMP + OpenBLAS | `bonsai-8b/cpu-blas/main.c` | `cpu-blas/bonsai-cpu-blas` | Practical multicore throughput (**recommended**) |
 
-An 8B model on CPU stays **heavy** (`cpu-omp` still scales with cores). Start with a small `-n` (e.g. `-n 1`) for smoke tests.
+An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for smoke tests; for longer runs prefer **`cpu-blas`** (see [Reference benchmark](#reference-benchmark) below).
 
 ## Repository layout
 
@@ -50,12 +52,15 @@ An 8B model on CPU stays **heavy** (`cpu-omp` still scales with cores). Start wi
     ├── cpu/
     │   ├── Makefile
     │   └── main.c
-    └── cpu-omp/
+    ├── cpu-omp/
+    │   ├── Makefile
+    │   └── main.c
+    └── cpu-blas/
         ├── Makefile
         └── main.c
 ```
 
-The reference decoder path lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**.
+The reference decoder path lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the optimized build is **`bonsai-8b/cpu-blas/`**.
 
 ## Beginners: what happens during LLM inference?
 
@@ -76,6 +81,7 @@ Here, that pipeline is **not** inside PyTorch; you can follow it **in the C sour
 - A C compiler (`gcc`, `clang`, …)  
 - `libm`  
 - For **`cpu-omp`**, a compiler/toolchain with **OpenMP** (`libgomp` or `libomp`, commonly bundled with GCC/Clang)  
+- For **`cpu-blas`**, the above plus **OpenBLAS** (e.g. `libopenblas-dev` on Debian/Ubuntu)  
 - **`Bonsai-8B-Q1_0.gguf`** from [prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)
 
 On Ubuntu-like systems:
@@ -83,6 +89,8 @@ On Ubuntu-like systems:
 ```bash
 sudo apt update
 sudo apt install -y build-essential make
+# For cpu-blas:
+# sudo apt install -y libopenblas-dev
 ```
 
 ## Obtain the model file
@@ -104,6 +112,7 @@ bonsai-8b/
 ├── Makefile
 ├── cpu/ … (`main.c` → `bonsai-cpu`)
 ├── cpu-omp/ … (`main.c` → `bonsai-cpu-omp`)
+├── cpu-blas/ … (`main.c` → `bonsai-cpu-blas`)
 └── Bonsai-8B-Q1_0.gguf
 ```
 
@@ -190,6 +199,52 @@ The local `Makefile` `run` target defaults to **`MODEL=../Bonsai-8B-Q1_0.gguf`**
 make run PROMPT="Give a one-sentence introduction of yourself."
 ```
 
+## Build & run (CPU + OpenMP + OpenBLAS, `cpu-blas`, recommended)
+
+Same model and CLI as `cpu-omp`, with a **fused Q1_0 dot kernel** (no intermediate FP32 dequant buffer) and **OpenBLAS** (batched `sgemv` for attention and F32 rows). OpenBLAS is pinned to **one thread**; parallelism comes from **OpenMP** (avoids nested threading).
+
+### Build
+
+```bash
+sudo apt install -y libopenblas-dev   # if needed
+cd bonsai-8b/cpu-blas
+make build
+```
+
+Produces **`bonsai-cpu-blas`**. From `bonsai-8b/`: `make build.cpu-blas` / `make run.cpu-blas`.
+
+### Run
+
+```bash
+cd bonsai-8b/cpu-blas
+./bonsai-cpu-blas ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+```bash
+cd bonsai-8b
+make run.cpu-blas PROMPT="Hello"
+```
+
+## Reference benchmark
+
+**Reference numbers from one development machine**—your results will vary with CPU, memory, compiler flags, and page-cache warmth. Re-run with the same GGUF and command to compare.
+
+| Item | Value |
+|---|---|
+| Date | 2026-05-19 |
+| CPU | AMD Ryzen AI 5 340 (12 logical cores) |
+| OS | Linux |
+| Model | `Bonsai-8B-Q1_0.gguf` (warm page cache) |
+| Command | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
+| Measured | 20 prompt tokens + **15 generated tokens** (stopped at EOS before `-n 16`) |
+
+| Binary | Total time | Generation throughput | Notes |
+|---|---:|---:|---|
+| `cpu-omp/bonsai-cpu-omp` | 161.7 s | **0.09 tok/s** | `-O3 -fopenmp` (`cpu-omp/Makefile` defaults) |
+| `cpu-blas/bonsai-cpu-blas` | 8.4 s | **1.79 tok/s** | `-O3 -fopenmp -march=native -ffast-math`, OpenBLAS at 1 thread |
+
+Under these conditions, **`cpu-blas` was about 20× faster**. Generated text (`Hello! I'm an AI assistant. How can I help you today?`) matched on both binaries. `-ffast-math` allows different FP reduction order than `cpu-omp`; output still matched in this run.
+
 ## Common CLI options
 
 | Option | Example | Meaning |
@@ -213,6 +268,12 @@ The OpenMP build accepts the same flags:
 ./cpu-omp/bonsai-cpu-omp Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
 ```
 
+The OpenBLAS build as well:
+
+```bash
+./cpu-blas/bonsai-cpu-blas Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
+```
+
 ## More deterministic output
 
 ```bash
@@ -230,7 +291,7 @@ cd bonsai-8b
 make clean
 ```
 
-`make clean` at `bonsai-8b/` removes **`cpu/bonsai-cpu`**. To remove **`cpu-omp/bonsai-cpu-omp`**, run `make clean` inside **`bonsai-8b/cpu-omp`**. The GGUF file is **not** deleted.
+`make clean` at `bonsai-8b/` removes **`cpu/bonsai-cpu`** and **`cpu-blas/bonsai-cpu-blas`**. To remove **`cpu-omp/bonsai-cpu-omp`**, run `make clean` inside **`bonsai-8b/cpu-omp`**. The GGUF file is **not** deleted.
 
 ## Troubleshooting
 
@@ -248,7 +309,7 @@ ls -lh bonsai-8b/Bonsai-8B-Q1_0.gguf
 
 ### CPU is slow
 
-Expected for an 8B model on CPU. Try `-n 1` or `-n 4`, or the **`cpu-omp`** binary with **`OMP_NUM_THREADS`**:
+Expected for an 8B model on CPU. Try `-n 1` or `-n 4`, or use **`cpu-blas`** (requires `libopenblas-dev`). With **`cpu-omp`** only, tune **`OMP_NUM_THREADS`**:
 
 ```bash
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
@@ -258,12 +319,17 @@ Expected for an 8B model on CPU. Try `-n 1` or `-n 4`, or the **`cpu-omp`** bina
 
 Install an OpenMP-capable toolchain and runtime (`libgomp` / `libomp` per distro), then rerun `make build` in **`cpu-omp`**.
 
+### OpenBLAS not found (`cpu-blas`)
+
+Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-blas`**. If headers live off the default path, see comments in **`cpu-blas/Makefile`** and set `CPPFLAGS` with `-I`.
+
 ## Reading the codebase
 
 1. `README.en.md` / `README.md` — build and run  
 2. `doc/design.md` — design and quantization  
 3. `bonsai-8b/cpu/main.c` — GGUF load through one-token generation (single-thread baseline)  
 4. `bonsai-8b/cpu-omp/main.c` — OpenMP parallel variant  
+5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + fused Q1_0 kernel  
 
 ## Out of scope
 
@@ -282,4 +348,4 @@ The goal is to **understand, experiment with, and adapt** **Bonsai-8B-Q1_0** (GG
 - Design: `doc/design.md`  
 - Changelog: `doc/ChangeLog`  
 
-If something fails, check **`bonsai-8b/Makefile`** and **`bonsai-8b/cpu-omp/Makefile`** targets, plus the model path you pass at runtime.
+If something fails, check **`bonsai-8b/Makefile`** (`build.cpu`, `build.cpu-blas`, `run.cpu-blas`, …), per-subdir Makefiles, and the model path you pass at runtime.

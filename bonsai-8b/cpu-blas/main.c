@@ -1,14 +1,21 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Bonsai 系 dense デコーダ GGUF — CPU C + OpenMP + OpenBLAS 版。
+ * Bonsai 系 dense デコーダ GGUF — CPU C + OpenMP + OpenBLAS 版（最適化）。
  *
  * 対象: Bonsai-8B-Q1_0.gguf（Q1_0 g128 + F32 norm 等）。テキスト経路のみ。
- * Matmul / embed: 量子化ブロックをスタック上で部分復号して GEMV（全重みの float 一括展開なし）。
  * RoPE: llama.cpp の ggml_compute_forward_rope に倣い NeoX 半分ペア配置 + YaRN 系メタを解釈。
  *
- * F32 の線形写像は OpenBLAS（cblas_sgemv / sdot / saxpy）、その他は cpu-omp と同様に OpenMP。
- * Q系・F16 の経路は従来どおり（量子化ブロック単位／変換ループ）。
+ * 並列・BLAS 方針:
+ *   - OpenBLAS は openblas_set_num_threads(1) で serial 固定し、並列度は OpenMP に一本化。
+ *     これにより BLAS と OpenMP の nested スレッドが衝突しない（pthread 版・openmp 版どちらでも有効）。
+ *   - Attention: ヘッド毎に K 内積を一回の cblas_sgemv(NoTrans) に集約し、
+ *     V 合成も一回の cblas_sgemv(Trans) に集約する（(pos+1) 回 → 1 回）。
+ *   - mm_f32: OpenMP で行帯を手分割し、帯ごとに serial sgemv。
+ *   - mm_q1_0_rows: Q1_0 専用の融合カーネル。FP32 への中間 dequant を廃し、
+ *     IEEE 754 の符号ビットを XOR で反転して ±x[j] を直接累積する（ブランチレス）。
+ *     -ffast-math + -march=native と組み合わせて SIMD 化を狙う。
+ *   - 他の量子化型・F16 は cpu-omp と同じ汎用パスを維持。
  */
 
 #include <stdio.h>
@@ -27,6 +34,10 @@
 #else
 #include <cblas.h>
 #endif
+
+/* OpenBLAS のスレッド数制御。cblas.h が公開しない実装もあるため extern 宣言で対処。 */
+extern void openblas_set_num_threads(int num_threads);
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -1370,9 +1381,34 @@ static void softmax(float *x, int n) {
     }
 }
 
+/*
+ * mm_f32: 行帯を OpenMP で手分割し、帯ごとに serial sgemv を呼ぶ。
+ * OpenBLAS は openblas_set_num_threads(1) で固定済みなので、帯内部は serial で動く。
+ * 行数が極端に少ない場合は単発の sgemv（呼び出し元スレッドのみ）にフォールバック。
+ */
 static void mm_f32(float *o, const float *x, const float *w, int n, int d) {
-    /* o = W x ; W は row-major で d×n、leading dimension = n */
+#ifdef _OPENMP
+    int nthr = omp_get_max_threads();
+    if (nthr <= 1 || d < 64) {
+        cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, o, 1);
+        return;
+    }
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        int nt  = omp_get_num_threads();
+        int per = (d + nt - 1) / nt;
+        int r0  = tid * per;
+        int r1  = r0 + per;
+        if (r1 > d) r1 = d;
+        if (r1 > r0) {
+            cblas_sgemv(CblasRowMajor, CblasNoTrans, r1 - r0, n, 1.0f,
+                        w + (size_t)r0 * n, n, x, 1, 0.0f, o + r0, 1);
+        }
+    }
+#else
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, o, 1);
+#endif
 }
 
 static void mm_f16(float *o, const float *x, const uint16_t *w, int n, int d) {
@@ -1385,11 +1421,58 @@ static void mm_f16(float *o, const float *x, const uint16_t *w, int n, int d) {
     }
 }
 
+/*
+ * Q1_0 専用 fused 行内積。
+ * block.d (FP16 scale) と 128 個の符号ビット qs[16] から、
+ * 中間 FP32 dequant バッファを経ずに直接 sum(x[j] * ±1) を計算する。
+ * 符号反転は IEEE 754 の MSB を XOR で切り替え（ブランチレス）、
+ * -ffast-math + -march=native で SIMD 化されることを狙う。
+ */
+static inline float dot_q1_0_row(const float *xp, const BlockQ1_0 *blocks, int nb) {
+    float acc = 0.0f;
+    for (int b = 0; b < nb; b++) {
+        const BlockQ1_0 *blk = &blocks[b];
+        const float d_blk = host_f16f32(blk->d);
+        const float *xx = xp + (size_t)b * QK1_0;
+        float bsum = 0.0f;
+        for (int k = 0; k < QK1_0 / 8; k++) {
+            const uint8_t qb = blk->qs[k];
+            const float *xs = xx + (size_t)k * 8;
+            for (int bit = 0; bit < 8; bit++) {
+                union { float f; uint32_t u; } sx;
+                sx.f = xs[bit];
+                /* sgn=1 -> flip_mask=0（そのまま+x）/ sgn=0 -> flip_mask=0x80000000（符号反転 -x） */
+                uint32_t sgn = ((uint32_t)((qb >> bit) & 1u)) - 1u;
+                sx.u ^= sgn & 0x80000000u;
+                bsum += sx.f;
+            }
+        }
+        acc += d_blk * bsum;
+    }
+    return acc;
+}
+
+static void mm_q1_0_rows(float *o, const float *x, const void *w, int n, int d) {
+    int nb = n / QK1_0;
+    size_t row_sz = (size_t)nb * sizeof(BlockQ1_0);
+    const uint8_t *wb = (const uint8_t *)w;
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < d; i++) {
+        const BlockQ1_0 *blocks =
+            (const BlockQ1_0 *)(wb + (size_t)i * row_sz);
+        o[i] = dot_q1_0_row(x, blocks, nb);
+    }
+}
+
 static void mm_quant_rows(float *o, const float *x, const void *w, int n, int d, int type) {
     int qel = quant_elems_per_block(type);
     if (n % qel) {
         fprintf(stderr, "mm_quant_rows: n=%d not multiple of quant block size %d\n", n, qel);
         exit(1);
+    }
+    if (type == DT_Q1_0) {
+        mm_q1_0_rows(o, x, w, n, d);
+        return;
     }
     int nb = n / qel;
     size_t row_sz = row_bytes_quant(type, n);
@@ -1579,27 +1662,40 @@ static void forward(Model *m, int token, int pos) {
         memcpy(kc_pos, s->k, kv_dim * sizeof(float));
         memcpy(vc_pos, s->v, kv_dim * sizeof(float));
 
+        /*
+         * Attention（GQA）の K 内積と V 合成を、ヘッドあたり 1 回ずつの cblas_sgemv に集約する。
+         *
+         *   K_head[t, :] : (pos+1, hd)、leading dim = kv_dim、頭出し = s->kc + loff + kvh * hd
+         *   att_h        = scale * K_head @ qh        ... sgemv(NoTrans, M=pos+1, N=hd)
+         *   oh           = V_head^T @ softmax(att_h)  ... sgemv(Trans,   M=pos+1, N=hd)
+         *
+         * 外側のヘッドループは OpenMP で並列化、内側の sgemv は openblas_set_num_threads(1) により
+         * 各スレッド内で serial（vectorized inner kernel のみ利用）。
+         */
+        float scale = 1.0f / sqrtf((float)hd);
+        int npos = pos + 1;
         #pragma omp parallel for schedule(static)
         for (int h = 0; h < n_heads; h++) {
-            float *qh = s->q + h * hd;
+            const float *qh = s->q + h * hd;
             int kvh = h / kv_mul;
             float *att_h = s->att + (size_t)h * max_seq;
-            float scale = 1.0f / sqrtf((float)hd);
+            const float *kc_head = s->kc + loff + (size_t)kvh * hd;
+            const float *vc_head = s->vc + loff + (size_t)kvh * hd;
 
-            for (int t = 0; t <= pos; t++) {
-                float *kt = s->kc + loff + (size_t)t * kv_dim + kvh * hd;
-                att_h[t] = cblas_sdot(hd, qh, 1, kt, 1) * scale;
-            }
+            cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                        npos, hd,
+                        scale, kc_head, kv_dim,
+                        qh, 1,
+                        0.0f, att_h, 1);
 
-            softmax(att_h, pos + 1);
+            softmax(att_h, npos);
 
             float *oh = s->xb + h * hd;
-            memset(oh, 0, hd * sizeof(float));
-            for (int t = 0; t <= pos; t++) {
-                float a = att_h[t];
-                float *vt = s->vc + loff + (size_t)t * kv_dim + kvh * hd;
-                cblas_saxpy(hd, a, vt, 1, oh, 1);
-            }
+            cblas_sgemv(CblasRowMajor, CblasTrans,
+                        npos, hd,
+                        1.0f, vc_head, kv_dim,
+                        att_h, 1,
+                        0.0f, oh, 1);
         }
 
         mm(s->xb2, s->xb, w->wo[l], dim, dim, w->wo_t[l]);
@@ -1789,6 +1885,20 @@ int main(int argc, char *argv[]) {
         else if (!strcmp(argv[i], "-s")) seed       = (uint64_t)strtoull(argv[i + 1], NULL, 10);
         else if (!strcmp(argv[i], "-l")) max_seq    = atoi(argv[i + 1]);
     }
+
+    /*
+     * OpenBLAS は serial 固定。並列度は OpenMP に一本化する。
+     * （pthread 版・openmp 版どちらでも、ネスト並列を避けるための共通設定。
+     *   利用者が OPENBLAS_NUM_THREADS で上書きするケースを考え、ここで明示的に 1 を渡す。）
+     */
+    openblas_set_num_threads(1);
+
+#ifdef _OPENMP
+    printf("Threads: OMP_NUM_THREADS=%d (omp_get_max_threads) | OpenBLAS=1 (serial)\n",
+           omp_get_max_threads());
+#else
+    printf("Threads: serial build | OpenBLAS=1\n");
+#endif
 
     printf("Loading %s ...\n", model_path);
 

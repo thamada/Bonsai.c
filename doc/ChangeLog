@@ -4,6 +4,22 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-19 03:15:05
+
+**追加・最適化**: **`bonsai-8b/cpu-blas/`**（**`main.c`** + **`Makefile`**）— **`cpu-omp`** をベースに **OpenMP + OpenBLAS** 版 **`bonsai-cpu-blas`**。起動時 **`openblas_set_num_threads(1)`** で BLAS は serial、並列は OpenMP に一本化。**Q1_0** 専用融合内積（`dot_q1_0_row` / `mm_q1_0_rows`）、Attention の **`cblas_sgemv`** 集約、F32 行の OpenMP 行帯 + serial **`sgemv`**。ビルドは **`-march=native -funroll-loops -ffast-math`**。
+
+**`bonsai-8b/Makefile`**: **`build.cpu-blas`** / **`run.cpu-blas`** を追加。**`clean`** で **`cpu-blas`** も削除。
+
+**`.gitignore`**: **`bonsai-8b/cpu-blas/bonsai-cpu-blas`** を無視対象に追加。
+
+**参考ベンチマーク**（AMD Ryzen AI 5 340・12 論理コア・`Bonsai-8B-Q1_0.gguf`・`-p "Hello" -n 16 -t 0`・生成 15 トークン）: **`bonsai-cpu-omp`** 161.7 s（0.09 tok/s）、**`bonsai-cpu-blas`** 8.4 s（1.79 tok/s、約 20 倍）。出力テキストは一致。
+
+**`README.md` / `README.en.md`**: **`cpu-blas`** の手順・要件（OpenBLAS）・上記ベンチマーク表を追記。
+
+**`doc/design.md`**: 実装バリアント・ディレクトリ表・Make ターゲット・実行時挙動（融合 Q1_0・Attention `sgemv`）・参考ベンチマーク・制約を **`cpu-blas`** 向けに更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-19 02:44:34
 
 **追加**: **`bonsai-8b/cpu-omp/`**（**`main.c`** + **`Makefile`**）— **`cpu/main.c`** を参考に **OpenMP** でマルチコア並列化した推論バイナリ **`bonsai-cpu-omp`**。同一 GGUF・同一 CLI。
