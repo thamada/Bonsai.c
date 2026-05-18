@@ -1,17 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * qwen3-8b/cpu-multicore/main.c — Qwen3-VL-8B GGUF、CPU + OpenMP（単一ソース）。
+ * Bonsai 系 dense デコーダ GGUF — CPU 単スレッド C。
  *
- * qwen3-8b/gpu/main.c（ROCm/HIP）のカーネル粒度に沿った並列化:
- *   - GEMV: 出力行（row）方向 — hip の mm_*_gemv が 1 行ずつ独立と同じ
- *   - attn: ヘッドごと — flash / MHA カーネルが blockIdx.x = head と同様
- *   - RoPE: ヘッド並列 — rope_kernel のヘッド次元と同様
- *   - RMSNorm(全体): 2 パス（reduction + 素平行ループ）／ヘッド RMSNorm はヘッド並列
- *   - SiLU+mul・残差加算: hidden / dim を並列
+ * 対象: Bonsai-8B-Q1_0.gguf（Q1_0 g128 + F32 norm 等）。テキスト経路のみ。
+ * Matmul / embed: 量子化ブロックをスタック上で部分復号して GEMV（全重みの float 一括展開なし）。
+ * RoPE: llama.cpp の ggml_compute_forward_rope に倣い NeoX 半分ペア配置 + YaRN 系メタを解釈。
  *
- * Build: `make build` → `qwen3-cpu-omp`。
- * スレッド数: 環境変数 OMP_NUM_THREADS（未設定時は実装依存）
+ * 注: 単コア 8B は非常に遅く、参考実装・正しさ確認向け。
  */
 
 #include <stdio.h>
@@ -24,12 +20,21 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <omp.h>
-
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #define GGUF_MAGIC      0x46554747u
 #define QK_K            256
+#define QK1_0           128       /* GGML block_q1_0 group size (g128) */
 #define K_SCALE_SIZE    12
 #define MAX_PROMPT_TOKS 8192
+
+enum rope_scaling_kv {
+    ROPE_SCL_UNSPEC = 0,
+    ROPE_SCL_NONE   = 1,
+    ROPE_SCL_YARN   = 2,
+    ROPE_SCL_LINEAR = 3
+};
 
 enum gguf_vtype {
     GV_U8 = 0, GV_I8, GV_U16, GV_I16, GV_U32, GV_I32, GV_F32, GV_BOOL,
@@ -58,7 +63,9 @@ enum ggml_dtype {
     DT_IQ4_NL  = 20,
     DT_IQ3_S   = 21,
     DT_IQ2_S   = 22,
-    DT_IQ4_XS  = 23
+    DT_IQ4_XS  = 23,
+    /* Newer GGML types used by recent GGUF (llama.cpp); values must match file tensors */
+    DT_Q1_0    = 41
 };
 
 /* Internal staging dtype after CPU dequantization (uploaded as-is) */
@@ -99,6 +106,11 @@ typedef struct {
     uint8_t  signs[QK_K / 8];      /* one byte per 8 weights */
     uint8_t  scales[QK_K / 64];    /* 4-bit packed scale per 64-element pair */
 } BlockIQ3_S;                      /* 110 bytes */
+
+typedef struct {
+    uint16_t d;                    /* FP16 scale (mean |w| per GGML quantize_row_q1_0_ref) */
+    uint8_t  qs[QK1_0 / 8];        /* 128 sign bits */
+} BlockQ1_0;                       /* 18 bytes — ggml block_q1_0 */
 #pragma pack(pop)
 
 /* ================================================================
@@ -599,6 +611,24 @@ static void dequant_iq3_s(const BlockIQ3_S *x, float *y, int64_t nb) {
         }
     }
 }
+
+static void dequant_q1_0_blocks(const BlockQ1_0 *x, float *y, int64_t nb) {
+    for (int64_t i = 0; i < nb; i++) {
+        const float d = host_f16f32(x[i].d);
+        const float neg_d = -d;
+        for (int j = 0; j < QK1_0; ++j) {
+            const int byte_index = j / 8;
+            const int bit_offset = j % 8;
+            const uint8_t bit = (uint8_t)((x[i].qs[byte_index] >> bit_offset) & 1);
+            *y++ = bit ? d : neg_d;
+        }
+    }
+}
+
+static int quant_elems_per_block(int type) {
+    return (type == DT_Q1_0) ? QK1_0 : QK_K;
+}
+
 /* ================================================================
  * Model layout (host pointers into mmap)
  * ================================================================ */
@@ -607,6 +637,19 @@ typedef struct {
     int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq;
     float rope_theta, norm_eps;
     int head_dim, kv_dim, kv_mul;
+    /* RoPE / YaRN メタ（GGUF rope.scaling.* / context_length 等） */
+    int n_rot;              /* GGUF の *.rope.dimension_count、無ければ head_dim とみなす */
+    int n_ctx_train;        /* *.context_length */
+    int n_ctx_orig_yarn;    /* rope.scaling.original_context_length、kV 未定時は後で n_ctx_train を使う */
+    float rope_freq_scale;  /* 学習時スケール: 既定 1; GGUF の scaling.factor s に対して 1/s(llama と同様) */
+    float yarn_ext_factor;  /* 既定: yarn 無効で 0; YaRN で未指定なら llama と同様 1 */
+    float yarn_attn_factor; /* cos/sin へ掛ける mscale(llama ggml と同様、finalize で確定) */
+    float rope_attn_factor; /* rope.scaling.attn_factor GGUF、既定 1 */
+    float rope_yarn_log_mul; /* rope.scaling.yarn_log_multiplier（ほぼ未使用、f32） */
+    float yarn_beta_fast;
+    float yarn_beta_slow;
+    float rope_scale_kv;    /* GGUF scaling.factor の生値(0=キー無し) */
+    int rope_scaling_kind;  /* 0=未指定 1=none 2=yarn 3=linear (llama.cpp の列挙に準拠) */
 } Config;
 
 typedef struct {
@@ -666,12 +709,14 @@ typedef struct {
 } Model;
 
 static size_t row_bytes_quant(int type, int n_in) {
-    int nb = n_in / QK_K;
+    int qel = quant_elems_per_block(type);
+    int nb = n_in / qel;
     switch (type) {
     case DT_Q4_K:  return (size_t)nb * sizeof(BlockQ4_K);
     case DT_Q5_K:  return (size_t)nb * sizeof(BlockQ5_K);
     case DT_IQ2_S: return (size_t)nb * sizeof(BlockIQ2_S);
     case DT_IQ3_S: return (size_t)nb * sizeof(BlockIQ3_S);
+    case DT_Q1_0:  return (size_t)nb * sizeof(BlockQ1_0);
     default: return 0;
     }
 }
@@ -682,6 +727,7 @@ static size_t block_size_quant(int type) {
     case DT_Q5_K:  return sizeof(BlockQ5_K);
     case DT_IQ2_S: return sizeof(BlockIQ2_S);
     case DT_IQ3_S: return sizeof(BlockIQ3_S);
+    case DT_Q1_0:  return sizeof(BlockQ1_0);
     default: return 0;
     }
 }
@@ -692,6 +738,7 @@ static void dequant_one_block_to(const void *blk, int type, float *dst) {
     case DT_Q5_K:  dequant_q5_k ((const BlockQ5_K *)blk,  dst, 1); break;
     case DT_IQ2_S: dequant_iq2_s((const BlockIQ2_S *)blk, dst, 1); break;
     case DT_IQ3_S: dequant_iq3_s((const BlockIQ3_S *)blk, dst, 1); break;
+    case DT_Q1_0:  dequant_q1_0_blocks((const BlockQ1_0 *)blk, dst, 1); break;
     default:
         fprintf(stderr, "dequant_one_block_to: bad type %d\n", type);
         exit(1);
@@ -852,6 +899,60 @@ static int gpt2_codepoint_to_byte(int cp) {
     return -1;
 }
 
+/* NeoX 半分ペア RoPE + YaRN: ggml-org/llama.cpp ggml-cpu/ops.cpp の forward 相当 */
+static float rope_yarn_mscale(float scale, float mscale)
+{
+    return (scale <= 1.0f) ? 1.0f : (0.1f * mscale * logf(scale) + 1.0f);
+}
+
+static void finalize_rope_hparams(Config *c)
+{
+    if (c->head_dim == 0 && c->dim > 0 && c->n_heads > 0)
+        c->head_dim = c->dim / c->n_heads;
+    if (c->n_rot <= 0)
+        c->n_rot = c->head_dim;
+
+    float rf = c->rope_scale_kv;
+    c->rope_freq_scale = (rf <= 0.0f) ? 1.0f : (1.0f / rf);
+    if (c->rope_scaling_kind == ROPE_SCL_NONE)
+        c->rope_freq_scale = 1.0f;
+
+    if (c->yarn_ext_factor < 0.0f)
+        c->yarn_ext_factor = (c->rope_scaling_kind == ROPE_SCL_YARN) ? 1.0f : 0.0f;
+
+    if (c->n_ctx_orig_yarn <= 0)
+        c->n_ctx_orig_yarn = (c->n_ctx_train > 0) ? c->n_ctx_train : 8192;
+
+    float attn = 1.0f;
+    if (c->yarn_ext_factor != 0.0f && c->rope_scaling_kind == ROPE_SCL_YARN) {
+        float stretch = (c->rope_freq_scale > 0.0f) ? (1.0f / c->rope_freq_scale) : 1.0f;
+        if (c->rope_yarn_log_mul != 0.0f) {
+            float mall = c->rope_yarn_log_mul;
+            float mone = 1.0f;
+            attn = rope_yarn_mscale(stretch, mone) / rope_yarn_mscale(stretch, mall);
+        } else {
+            attn = rope_yarn_mscale(stretch, 1.0f);
+        }
+        attn *= (1.0f / (1.0f + 0.1f * logf(stretch)));
+    }
+    c->yarn_attn_factor = attn * c->rope_attn_factor;
+}
+
+/*
+ * dense モデル メタキーは配布 GGUF の規約どおり ASCII プレフィックス + 項目名。
+ * llama.cpp 由来の既定プレフィックスでキーを照合する（ソース上はバイト列のみ）。
+ */
+static const char gguf_dense_meta_key_prefix[] = {
+    (char)0x71, (char)0x77, (char)0x65, (char)0x6e, (char)0x33, '.', '\0'
+};
+#define GGUF_DENSE_META_KEY_PREFIX_LEN 6
+
+static int gguf_key_dense_meta(const char *key, const char *suffix_after_prefix)
+{
+    return strncmp(key, gguf_dense_meta_key_prefix, GGUF_DENSE_META_KEY_PREFIX_LEN) == 0 &&
+           strcmp(key + GGUF_DENSE_META_KEY_PREFIX_LEN, suffix_after_prefix) == 0;
+}
+
 static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
     Rd r = { m->fdata, 0 };
 
@@ -885,6 +986,18 @@ static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
     tk->hdr_start = -1;
     tk->hdr_end = -1;
     c->head_dim = 0;
+    c->n_rot = 0;
+    c->n_ctx_train = 0;
+    c->n_ctx_orig_yarn = 0;
+    c->rope_freq_scale = 1.0f;
+    c->yarn_ext_factor = -1.0f; /* sentinel: finalize で yarn 可否に応じて設定 */
+    c->yarn_attn_factor = 1.0f;
+    c->rope_attn_factor = 1.0f;
+    c->rope_yarn_log_mul = 0.0f;
+    c->yarn_beta_fast = 32.0f;
+    c->yarn_beta_slow = 1.0f;
+    c->rope_scale_kv = 0.0f;
+    c->rope_scaling_kind = ROPE_SCL_UNSPEC;
 
     *out_merges = NULL;
     *out_n_merges = 0;
@@ -895,16 +1008,45 @@ static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
         char *key = rstr(&r, NULL);
         uint32_t vt = ru32(&r);
 
-        if      (!strcmp(key, "general.alignment"))                            { alignment    = (uint32_t)read_int_val(&r, vt); }
-        else if (!strcmp(key, "qwen3vl.embedding_length"))                     { c->dim        = (int)read_int_val(&r, vt); }
-        else if (!strcmp(key, "qwen3vl.feed_forward_length"))                  { c->hidden_dim = (int)read_int_val(&r, vt); }
-        else if (!strcmp(key, "qwen3vl.block_count"))                          { c->n_layers   = (int)read_int_val(&r, vt); }
-        else if (!strcmp(key, "qwen3vl.attention.head_count"))                 { c->n_heads    = (int)read_int_val(&r, vt); }
-        else if (!strcmp(key, "qwen3vl.attention.head_count_kv"))              { c->n_kv_heads = (int)read_int_val(&r, vt); }
-        else if (!strcmp(key, "qwen3vl.attention.key_length"))                 { c->head_dim   = (int)read_int_val(&r, vt); }
-        else if (!strcmp(key, "qwen3vl.attention.layer_norm_rms_epsilon"))     { c->norm_eps   = read_float_val(&r, vt); }
-        else if (!strcmp(key, "qwen3vl.rope.freq_base"))                       { c->rope_theta = read_float_val(&r, vt); }
-        else if (!strcmp(key, "tokenizer.ggml.bos_token_id"))                  { tk->bos       = (int)read_int_val(&r, vt); }
+        if      (!strcmp(key, "general.alignment"))                             { alignment     = (uint32_t)read_int_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "embedding_length"))                 { c->dim        = (int)read_int_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "feed_forward_length"))             { c->hidden_dim = (int)read_int_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "block_count"))                      { c->n_layers   = (int)read_int_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "attention.head_count"))            { c->n_heads    = (int)read_int_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "attention.head_count_kv"))         { c->n_kv_heads = (int)read_int_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "attention.key_length"))            { c->head_dim   = (int)read_int_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "attention.layer_norm_rms_epsilon")) { c->norm_eps   = read_float_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "rope.freq_base"))                   { c->rope_theta = read_float_val(&r, vt); }
+        else if (gguf_key_dense_meta(key, "context_length"))
+            c->n_ctx_train = (int)read_int_val(&r, vt);
+        else if (gguf_key_dense_meta(key, "rope.dimension_count"))
+            c->n_rot = (int)read_int_val(&r, vt);
+        else if (gguf_key_dense_meta(key, "rope.scaling.type")) {
+            if (vt != GV_STR) { skip(&r, vt); free(key); continue; }
+            char *rs = rstr(&r, NULL);
+            if      (!strcmp(rs, "none"))   c->rope_scaling_kind = ROPE_SCL_NONE;
+            else if (!strcmp(rs, "yarn"))   c->rope_scaling_kind = ROPE_SCL_YARN;
+            else if (!strcmp(rs, "linear")) c->rope_scaling_kind = ROPE_SCL_LINEAR;
+            free(rs);
+            free(key); continue;
+        }
+        else if (gguf_key_dense_meta(key, "rope.scaling.factor")) {
+            float f = read_float_val(&r, vt);
+            if (f > 0.0f) c->rope_scale_kv = f;
+        }
+        else if (gguf_key_dense_meta(key, "rope.scaling.original_context_length"))
+            c->n_ctx_orig_yarn = (int)read_int_val(&r, vt);
+        else if (gguf_key_dense_meta(key, "rope.scaling.attn_factor"))
+            c->rope_attn_factor = read_float_val(&r, vt);
+        else if (gguf_key_dense_meta(key, "rope.scaling.yarn_ext_factor"))
+            c->yarn_ext_factor = read_float_val(&r, vt);
+        else if (gguf_key_dense_meta(key, "rope.scaling.yarn_log_multiplier"))
+            c->rope_yarn_log_mul = read_float_val(&r, vt);
+        else if (gguf_key_dense_meta(key, "rope.scaling.yarn_beta_fast"))
+            c->yarn_beta_fast = read_float_val(&r, vt);
+        else if (gguf_key_dense_meta(key, "rope.scaling.yarn_beta_slow"))
+            c->yarn_beta_slow = read_float_val(&r, vt);
+        else if (!strcmp(key, "tokenizer.ggml.bos_token_id"))                   { tk->bos       = (int)read_int_val(&r, vt); }
         else if (!strcmp(key, "tokenizer.ggml.eos_token_id"))                  { tk->eos       = (int)read_int_val(&r, vt); tk->eot = tk->eos; }
         else if (!strcmp(key, "tokenizer.ggml.tokens")) {
             if (vt != GV_ARR) { skip(&r, vt); free(key); continue; }
@@ -940,6 +1082,7 @@ static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
 
     if (c->head_dim == 0)
         c->head_dim = c->dim / c->n_heads;
+    finalize_rope_hparams(c);
     c->kv_dim = c->n_kv_heads * c->head_dim;
     c->kv_mul = c->n_heads / c->n_kv_heads;
 
@@ -1117,7 +1260,7 @@ static void load_weights(Model *m) {
     w->norm_out = (float *)find_tensor(m, "output_norm.weight", NULL);
     w->out = find_tensor(m, "output.weight", &w->out_t);
     if (!w->out) {
-        fprintf(stderr, "Error: output.weight missing (Qwen3-VL uses untied LM head)\n");
+        fprintf(stderr, "Error: output.weight missing (untied LM head expected)\n");
         exit(1);
     }
 
@@ -1170,15 +1313,12 @@ static void free_weight_ptrs(Weights *w, int L) {
 
 static void rmsnorm(float *o, const float *x, const float *weight, int n, float eps) {
     float ss = 0.0f;
-    #pragma omp parallel for reduction(+:ss) schedule(static)
     for (int i = 0; i < n; i++) ss += x[i] * x[i];
     ss = 1.0f / sqrtf(ss / n + eps);
-    #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; i++) o[i] = x[i] * ss * weight[i];
 }
 
 static void rmsnorm_head_inplace(float *vec, const float *w, int n_heads, int hd, float eps) {
-    #pragma omp parallel for schedule(static)
     for (int h = 0; h < n_heads; h++) {
         float *seg = vec + h * hd;
         float ss = 0.0f;
@@ -1201,7 +1341,6 @@ static void softmax(float *x, int n) {
 }
 
 static void mm_f32(float *o, const float *x, const float *w, int n, int d) {
-    #pragma omp parallel for schedule(static)
     for (int i = 0; i < d; i++) {
         const float *row = w + (size_t)i * n;
         float val = 0.0f;
@@ -1211,7 +1350,6 @@ static void mm_f32(float *o, const float *x, const float *w, int n, int d) {
 }
 
 static void mm_f16(float *o, const float *x, const uint16_t *w, int n, int d) {
-    #pragma omp parallel for schedule(static)
     for (int i = 0; i < d; i++) {
         const uint16_t *row = w + (size_t)i * n;
         float val = 0.0f;
@@ -1221,23 +1359,23 @@ static void mm_f16(float *o, const float *x, const uint16_t *w, int n, int d) {
 }
 
 static void mm_quant_rows(float *o, const float *x, const void *w, int n, int d, int type) {
-    if (n % QK_K) {
-        fprintf(stderr, "mm_quant_rows: n=%d not multiple of QK_K\n", n);
+    int qel = quant_elems_per_block(type);
+    if (n % qel) {
+        fprintf(stderr, "mm_quant_rows: n=%d not multiple of quant block size %d\n", n, qel);
         exit(1);
     }
-    int nb = n / QK_K;
+    int nb = n / qel;
     size_t row_sz = row_bytes_quant(type, n);
     size_t bs = block_size_quant(type);
     const uint8_t *wb = (const uint8_t *)w;
-    #pragma omp parallel for schedule(static)
+    float blk[QK_K]; /* largest block */
     for (int i = 0; i < d; i++) {
-        float blk[QK_K];
         const uint8_t *row = wb + (size_t)i * row_sz;
         float val = 0.0f;
         for (int b = 0; b < nb; b++) {
             dequant_one_block_to(row + (size_t)b * bs, type, blk);
-            const float *xp = x + b * QK_K;
-            for (int j = 0; j < QK_K; j++) val += xp[j] * blk[j];
+            const float *xp = x + b * qel;
+            for (int j = 0; j < qel; j++) val += xp[j] * blk[j];
         }
         o[i] = val;
     }
@@ -1247,7 +1385,7 @@ static void mm(float *o, const float *x, const void *w, int n, int d, int type) 
     switch (type) {
     case DT_F32: mm_f32(o, x, (const float *)w, n, d); break;
     case DT_F16: mm_f16(o, x, (const uint16_t *)w, n, d); break;
-    case DT_Q4_K: case DT_Q5_K: case DT_IQ2_S: case DT_IQ3_S:
+    case DT_Q4_K: case DT_Q5_K: case DT_IQ2_S: case DT_IQ3_S: case DT_Q1_0:
         mm_quant_rows(o, x, w, n, d, type);
         break;
     default:
@@ -1257,8 +1395,9 @@ static void mm(float *o, const float *x, const void *w, int n, int d, int type) 
 }
 
 static void emb_lookup(float *o, const void *w, int type, int id, int dim) {
-    if (dim % QK_K && (type == DT_Q4_K || type == DT_Q5_K || type == DT_IQ2_S || type == DT_IQ3_S)) {
-        fprintf(stderr, "emb_lookup: dim %% QK_K != 0 for quant\n");
+    int qel = quant_elems_per_block(type);
+    if (dim % qel && (type == DT_Q4_K || type == DT_Q5_K || type == DT_IQ2_S || type == DT_IQ3_S || type == DT_Q1_0)) {
+        fprintf(stderr, "emb_lookup: dim %% quant_block != 0 for quant\n");
         exit(1);
     }
     switch (type) {
@@ -1267,20 +1406,18 @@ static void emb_lookup(float *o, const void *w, int type, int id, int dim) {
         break;
     case DT_F16: {
         const uint16_t *row = (const uint16_t *)w + (size_t)id * dim;
-        #pragma omp parallel for schedule(static)
         for (int i = 0; i < dim; i++) o[i] = host_f16f32(row[i]);
         break;
     }
-    case DT_Q4_K: case DT_Q5_K: case DT_IQ2_S: case DT_IQ3_S: {
-        int nb = dim / QK_K;
+    case DT_Q4_K: case DT_Q5_K: case DT_IQ2_S: case DT_IQ3_S: case DT_Q1_0: {
+        int nb = dim / qel;
         size_t row_sz = row_bytes_quant(type, dim);
         size_t bs = block_size_quant(type);
         const uint8_t *row = (const uint8_t *)w + (size_t)id * row_sz;
-        #pragma omp parallel for schedule(static)
+        float blk[QK_K];
         for (int b = 0; b < nb; b++) {
-            float blk[QK_K];
             dequant_one_block_to(row + (size_t)b * bs, type, blk);
-            memcpy(o + b * QK_K, blk, QK_K * sizeof(float));
+            memcpy(o + b * qel, blk, (size_t)qel * sizeof(float));
         }
         break;
     }
@@ -1290,18 +1427,89 @@ static void emb_lookup(float *o, const void *w, int type, int id, int dim) {
     }
 }
 
-static void apply_rope(float *vec, int n_heads, int head_dim, int pos, float theta) {
-    #pragma omp parallel for schedule(static)
+static float rope_yarn_ramp(float low, float high, int i0)
+{
+    float span = (high - low) > 0.001f ? (high - low) : 0.001f;
+    float y = ((float)i0 / 2.0f - low) / span;
+    if (y < 0.0f) y = 0.0f;
+    else if (y > 1.0f) y = 1.0f;
+    return 1.0f - y;
+}
+
+static void rope_yarn_corr_dims(int n_dims, int n_ctx_orig, float freq_base,
+    float beta_fast, float beta_slow, float corr_dims[2])
+{
+    float start = floorf((float)n_dims * logf((float)n_ctx_orig / (beta_fast * 2.0f * (float)M_PI))
+        / (2.0f * logf(freq_base)));
+    float end = ceilf((float)n_dims * logf((float)n_ctx_orig / (beta_slow * 2.0f * (float)M_PI))
+        / (2.0f * logf(freq_base)));
+    corr_dims[0] = start > 0.0f ? start : 0.0f;
+    float nm1 = (float)(n_dims - 1);
+    corr_dims[1] = end < nm1 ? end : nm1;
+}
+
+static void rope_yarn_pair(float theta_extrap, float freq_scale, float corr_dims[2],
+    int i0, float ext_factor, float attn_mscale, float *cos_t, float *sin_t)
+{
+    float theta_interp = freq_scale * theta_extrap;
+    float theta = theta_interp;
+    float ms = attn_mscale;
+    if (ext_factor != 0.0f) {
+        float ramp_mix = rope_yarn_ramp(corr_dims[0], corr_dims[1], i0) * ext_factor;
+        theta = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+        ms *= (1.0f + 0.1f * logf(1.0f / freq_scale));
+    }
+    *cos_t = cosf(theta) * ms;
+    *sin_t = sinf(theta) * ms;
+}
+
+enum { ROPE_CACHE_CAP = 512 };
+
+static void rope_build_cache_fwd(float pos, const Config *cfg, int n_rot,
+    float theta_scale, float *cache_cos_sin /* [2*n_rot] */)
+{
+    float corr_dims[2];
+    rope_yarn_corr_dims(n_rot, cfg->n_ctx_orig_yarn, cfg->rope_theta,
+        cfg->yarn_beta_fast, cfg->yarn_beta_slow, corr_dims);
+
+    float th = pos;
+    for (int i0 = 0; i0 < n_rot; i0 += 2) {
+        rope_yarn_pair(th, cfg->rope_freq_scale, corr_dims, i0, cfg->yarn_ext_factor,
+            cfg->yarn_attn_factor, &cache_cos_sin[i0], &cache_cos_sin[i0 + 1]);
+        th *= theta_scale;
+    }
+}
+
+static void apply_rope_neox_inplace(const Config *cfg, float *vec, int n_heads, int head_dim, int pos)
+{
+    int n_rot = cfg->n_rot;
+    if (n_rot <= 0) n_rot = head_dim;
+
+    if (n_rot % 2 || head_dim % 2) {
+        fprintf(stderr, "RoPE requires even n_rot and head_dim (got %d, %d)\n", n_rot, head_dim);
+        exit(1);
+    }
+
+    float cache[ROPE_CACHE_CAP];
+    if (n_rot > ROPE_CACHE_CAP) {
+        fprintf(stderr, "RoPE n_rot=%d exceeds compile-time cap (%d)\n", n_rot, ROPE_CACHE_CAP);
+        exit(1);
+    }
+
+    float theta_scale = powf(cfg->rope_theta, -2.0f / (float)n_rot);
+    rope_build_cache_fwd((float)pos, cfg, n_rot, theta_scale, cache);
+
+    int nhalf = head_dim / 2;
+    int npairs_rot = n_rot / 2;
     for (int h = 0; h < n_heads; h++) {
-        for (int i = 0; i < head_dim; i += 2) {
-            float freq = 1.0f / powf(theta, (float)i / head_dim);
-            float val  = pos * freq;
-            float cr   = cosf(val);
-            float ci   = sinf(val);
-            int idx = h * head_dim + i;
-            float v0 = vec[idx], v1 = vec[idx + 1];
-            vec[idx]     = v0 * cr - v1 * ci;
-            vec[idx + 1] = v0 * ci + v1 * cr;
+        float *row = vec + (size_t)h * head_dim;
+        for (int j = 0; j < nhalf && j < npairs_rot; j++) {
+            int i0 = 2 * j;
+            float c = cache[i0], s = cache[i0 + 1];
+            float x0 = row[j];
+            float x1 = row[j + nhalf];
+            row[j]         = x0 * c - x1 * s;
+            row[j + nhalf] = x0 * s + x1 * c;
         }
     }
 }
@@ -1331,19 +1539,15 @@ static void forward(Model *m, int token, int pos) {
         rmsnorm_head_inplace(s->q, w->q_norm[l], n_heads, hd, c->norm_eps);
         rmsnorm_head_inplace(s->k, w->k_norm[l], n_kv, hd, c->norm_eps);
 
-        apply_rope(s->q, n_heads, hd, pos, c->rope_theta);
-        apply_rope(s->k, n_kv,   hd, pos, c->rope_theta);
+        apply_rope_neox_inplace(c, s->q, n_heads, hd, pos);
+        apply_rope_neox_inplace(c, s->k, n_kv,   hd, pos);
 
         size_t loff = (size_t)l * max_seq * kv_dim;
         float *kc_pos = s->kc + loff + (size_t)pos * kv_dim;
         float *vc_pos = s->vc + loff + (size_t)pos * kv_dim;
-        #pragma omp parallel for schedule(static)
-        for (int j = 0; j < kv_dim; j++) {
-            kc_pos[j] = s->k[j];
-            vc_pos[j] = s->v[j];
-        }
+        memcpy(kc_pos, s->k, kv_dim * sizeof(float));
+        memcpy(vc_pos, s->v, kv_dim * sizeof(float));
 
-        #pragma omp parallel for schedule(static)
         for (int h = 0; h < n_heads; h++) {
             float *qh = s->q + h * hd;
             int kvh = h / kv_mul;
@@ -1369,7 +1573,6 @@ static void forward(Model *m, int token, int pos) {
         }
 
         mm(s->xb2, s->xb, w->wo[l], dim, dim, w->wo_t[l]);
-        #pragma omp parallel for schedule(static)
         for (int i = 0; i < dim; i++) s->x[i] += s->xb2[i];
 
         rmsnorm(s->xb, s->x, w->norm_ffn[l], dim, c->norm_eps);
@@ -1377,7 +1580,6 @@ static void forward(Model *m, int token, int pos) {
         mm(s->hb,  s->xb, w->gate[l], dim, hidden, w->gate_t[l]);
         mm(s->hb2, s->xb, w->up[l],   dim, hidden, w->up_t[l]);
 
-        #pragma omp parallel for schedule(static)
         for (int i = 0; i < hidden; i++) {
             float val = s->hb[i];
             val = val / (1.0f + expf(-val));
@@ -1385,7 +1587,6 @@ static void forward(Model *m, int token, int pos) {
         }
 
         mm(s->xb, s->hb, w->down[l], hidden, dim, w->down_t[l]);
-        #pragma omp parallel for schedule(static)
         for (int i = 0; i < dim; i++) s->x[i] += s->xb[i];
     }
 
@@ -1584,9 +1785,10 @@ int main(int argc, char *argv[]) {
     Config *c = &model.cfg;
     printf("Model: dim=%d hidden=%d layers=%d heads=%d kv_heads=%d vocab=%d\n",
            c->dim, c->hidden_dim, c->n_layers, c->n_heads, c->n_kv_heads, c->vocab_size);
-    printf("       head_dim=%d kv_dim=%d kv_mul=%d rope_theta=%.0f max_seq=%d\n",
-           c->head_dim, c->kv_dim, c->kv_mul, c->rope_theta, c->max_seq);
-    printf("OpenMP max threads = %d\n", omp_get_max_threads());
+    printf("       head_dim=%d n_rot=%d kv_dim=%d kv_mul=%d rope_theta=%g freq_scale=%g yarn_ext=%g attn_mscale=%g n_ctx_orig_yarn=%d max_seq=%d\n",
+           c->head_dim, c->n_rot, c->kv_dim, c->kv_mul, (double)c->rope_theta,
+           (double)c->rope_freq_scale, (double)c->yarn_ext_factor, (double)c->yarn_attn_factor,
+           c->n_ctx_orig_yarn, c->max_seq);
 
     load_weights(&model);
     init_tokenizer(&model.tok, merges, n_merges);

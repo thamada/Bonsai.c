@@ -1,0 +1,1 @@
+https://huggingface.co/prism-ml/Bonsai-8B-gguf/blob/main/Bonsai-8B-Q1_0.gguf

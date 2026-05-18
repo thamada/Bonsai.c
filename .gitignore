@@ -7,17 +7,8 @@ __pycache__/
 *.gguf
 Meta-Llama-3-8B-Instruct.Q8_0.gguf
 
-# qwen3-8b ビルド成果物（各サブディレクトリの Makefile）
-qwen3-8b/cpu/qwen3-cpu
-qwen3-8b/cpu-multicore/qwen3-cpu-omp
-qwen3-8b/gpu/qwen3-rocm
-qwen3-8b/xdna2/qwen3-xdna2
-qwen3-8b/xdna2-bfp16/qwen3-xdna2-bfpx
-# 誤って qwen3-8b/ 直下に生成された古いバイナリ（無視）
-qwen3-8b/qwen3-cpu
-qwen3-8b/qwen3-cpu-omp
-qwen3-8b/qwen3-rocm
-qwen3-8b/qwen3-xdna2
-qwen3-8b/qwen3-xdna2-bfpx
-qwen3-8b/qwen3-xdna2-tiny
-qwen3-8b/qwen3-xdna2-mmap
+# bonsai-8b ビルド成果物
+bonsai-8b/cpu/bonsai-cpu
+bonsai-8b/cpu/qwen3-cpu
+# 誤って bonsai-8b/ 直下に生成された古いバイナリ（無視）
+bonsai-8b/qwen3-cpu
