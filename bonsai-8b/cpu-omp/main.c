@@ -4,7 +4,8 @@
  * Bonsai 系 dense デコーダ GGUF — CPU C + OpenMP 並列版。
  *
  * 対象: Bonsai-8B-Q1_0.gguf（Q1_0 g128 + F32 norm 等）。テキスト経路のみ。
- * Matmul / embed: 量子化ブロックをスタック上で部分復号して GEMV（全重みの float 一括展開なし）。
+ * Matmul / embed: Q1_0 は融合行内積（ggml vec_dot_q1_0 相当、中間 FP32 展開なし）。
+ * 他の量子化型はブロック単位で部分復号して GEMV。
  * RoPE: llama.cpp の ggml_compute_forward_rope に倣い NeoX 半分ペア配置 + YaRN 系メタを解釈。
  *
  * 注: 8B は重い。cpu-omp は OpenMP で matmul・attention 等主要ループを並列化した版。
@@ -925,7 +926,8 @@ static void finalize_rope_hparams(Config *c)
         c->n_ctx_orig_yarn = (c->n_ctx_train > 0) ? c->n_ctx_train : 8192;
 
     float attn = 1.0f;
-    if (c->yarn_ext_factor != 0.0f && c->rope_scaling_kind == ROPE_SCL_YARN) {
+    /* llama-context.cpp: yarn_ext_factor != 0 のとき attn_factor を確定 */
+    if (c->yarn_ext_factor != 0.0f) {
         float stretch = (c->rope_freq_scale > 0.0f) ? (1.0f / c->rope_freq_scale) : 1.0f;
         if (c->rope_yarn_log_mul != 0.0f) {
             float mall = c->rope_yarn_log_mul;
@@ -1181,14 +1183,14 @@ static void append_bpe(Tok *tk, int *out, int *n, const char *text) {
     free(t);
 }
 
+/*
+ * GGUF tokenizer.chat_template（Qwen3 / Bonsai）の単一 user ターン + 生成プレフィックスに合わせる。
+ * 既定 system 文は挿入しない。assistant 開始は空の think ブロック付き
+ *（add_generation_prompt 相当。PrismML llama.cpp -cnv と同じ）。
+ */
 static int *chat_encode(Tok *tk, const char *prompt, int *out_n) {
     int *toks = (int *)malloc(MAX_PROMPT_TOKS * sizeof(int));
     int n = 0;
-
-    if (tk->im_start >= 0) toks[n++] = tk->im_start;
-    append_bpe(tk, toks, &n, "system\nYou are a helpful assistant.");
-    if (tk->im_end >= 0) toks[n++] = tk->im_end;
-    append_bpe(tk, toks, &n, "\n");
 
     if (tk->im_start >= 0) toks[n++] = tk->im_start;
     append_bpe(tk, toks, &n, "user\n");
@@ -1197,7 +1199,11 @@ static int *chat_encode(Tok *tk, const char *prompt, int *out_n) {
     append_bpe(tk, toks, &n, "\n");
 
     if (tk->im_start >= 0) toks[n++] = tk->im_start;
-    append_bpe(tk, toks, &n, "assistant\n");
+    /* GGUF chat_template add_generation_prompt と同じリテラル */
+    append_bpe(tk, toks, &n,
+        "assistant\n"
+        "\x3c\x7cthink\x7c\x3e\n\n"
+        "\x3c\x2fthink\x7c\x3e\n\n");
 
     *out_n = n;
     return toks;
@@ -1384,11 +1390,53 @@ static void mm_f16(float *o, const float *x, const uint16_t *w, int n, int d) {
     }
 }
 
+/*
+ * Q1_0 専用融合行内積（ggml/src/ggml-quants.c dequantize_row_q1_0 + 内積と同等）。
+ * 符号ビットで ±d·x[j] を IEEE 754 符号 XOR で表現し、中間 FP32 ブロックを使わない。
+ */
+static inline float dot_q1_0_row(const float *xp, const BlockQ1_0 *blocks, int nb) {
+    float acc = 0.0f;
+    for (int b = 0; b < nb; b++) {
+        const BlockQ1_0 *blk = &blocks[b];
+        const float d_blk = host_f16f32(blk->d);
+        const float *xx = xp + (size_t)b * QK1_0;
+        float bsum = 0.0f;
+        for (int k = 0; k < QK1_0 / 8; k++) {
+            const uint8_t qb = blk->qs[k];
+            const float *xs = xx + (size_t)k * 8;
+            for (int bit = 0; bit < 8; bit++) {
+                union { float f; uint32_t u; } sx;
+                sx.f = xs[bit];
+                uint32_t sgn = ((uint32_t)((qb >> bit) & 1u)) - 1u;
+                sx.u ^= sgn & 0x80000000u;
+                bsum += sx.f;
+            }
+        }
+        acc += d_blk * bsum;
+    }
+    return acc;
+}
+
+static void mm_q1_0_rows(float *o, const float *x, const void *w, int n, int d) {
+    int nb = n / QK1_0;
+    size_t row_sz = (size_t)nb * sizeof(BlockQ1_0);
+    const uint8_t *wb = (const uint8_t *)w;
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < d; i++) {
+        const BlockQ1_0 *blocks = (const BlockQ1_0 *)(wb + (size_t)i * row_sz);
+        o[i] = dot_q1_0_row(x, blocks, nb);
+    }
+}
+
 static void mm_quant_rows(float *o, const float *x, const void *w, int n, int d, int type) {
     int qel = quant_elems_per_block(type);
     if (n % qel) {
         fprintf(stderr, "mm_quant_rows: n=%d not multiple of quant block size %d\n", n, qel);
         exit(1);
+    }
+    if (type == DT_Q1_0) {
+        mm_q1_0_rows(o, x, w, n, d);
+        return;
     }
     int nb = n / qel;
     size_t row_sz = row_bytes_quant(type, n);

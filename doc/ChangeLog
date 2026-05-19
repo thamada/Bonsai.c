@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-19 12:55:29
+
+**追随**: **`bonsai-8b/cpu-omp/main.c`** — **`cpu/main.c`** と同内容を反映。**Q1_0 融合行内積**（**`dot_q1_0_row`** / **`mm_q1_0_rows`**、行ループは **`#pragma omp parallel for`**）。**RoPE** **`yarn_attn_factor`** 確定条件の修正。**`chat_encode`** を GGUF **`chat_template`** に整合。
+
+**追随**: **`bonsai-8b/cpu-blas/main.c`** — **RoPE**・**`chat_encode`** を **`cpu/main.c`** と同様に修正（Q1_0 融合は既存）。先頭コメントにチャット方針を追記。
+
+**`doc/design.md`**: 3 バリアントが **Q1_0 融合・RoPE・`chat_encode`** で揃った旨に更新。参考ベンチマークは **cpu-omp** 融合導入前の計測である旨を注記。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-19 12:48:57
 
 **最適化・整合**: **`bonsai-8b/cpu/main.c`**（参照実装）— **Q1_0 融合行内積**（**`dot_q1_0_row`** / **`mm_q1_0_rows`**）。`ggml-quants.c` の dequantize + 内積と同等だが中間 FP32 ブロックを経由しない（符号ビットと入力 **`x[j]`** の IEEE 754 符号 XOR）。**`mm_quant_rows`** の **Q1_0** 分岐で使用。

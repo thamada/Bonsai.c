@@ -27,8 +27,8 @@
 | ソース | 実行環境 | 概要 |
 |--------|----------|------|
 | `bonsai-8b/cpu/main.c` | **CPU、単スレッド** | GGUF mmap。**Q1_0** は融合行内積（**`dot_q1_0_row`**、中間 FP32 展開なし）。他量子化型はブロック単位で部分復元して GEMV。Norm 等は F32。`libm` のみ。 |
-| `bonsai-8b/cpu-omp/main.c` | **CPU、OpenMP マルチスレッド** | 上記と同一 GGUF・CLI。行列積・ヘッド単位アテンション・SwiGLU／残差など主要ループを **OpenMP** で並列化。`libm` と **OpenMP ランタイム**。 |
-| `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | `cpu-omp` と同一 GGUF・CLI。**Q1_0 行内積は融合カーネル**（中間 FP32 展開なし）。Attention はヘッドあたり **2 回の `cblas_sgemv`**（K 内積・V 合成）。F32 行は OpenMP 行帯分割 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`** で BLAS は serial、並列は OpenMP のみ。 |
+| `bonsai-8b/cpu-omp/main.c` | **CPU、OpenMP マルチスレッド** | **`cpu`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は融合行内積（**`mm_q1_0_rows`** を OpenMP 行並列）。他量子化型はブロック dequant + OpenMP。Attention・SwiGLU 等も **OpenMP**。 |
+| `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一 GGUF・CLI・**`chat_encode`**・RoPE・**Q1_0 融合**。Attention はヘッドあたり **2 回の `cblas_sgemv`**。F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
 
 メタデータの照合は **GGUF 内の `qwen3.*` プレフィックス**（実装上のバイト列。`embedding_length` 等）と tokenizer 系キーで行う。実装コメントは「dense デコーダ」「Bonsai」と整合する。
 
@@ -47,7 +47,7 @@
 | `bonsai-cpu-omp` | 161.7 s | 0.09 tok/s |
 | `bonsai-cpu-blas` | 8.4 s | 1.79 tok/s（約 20 倍） |
 
-`cpu-blas` は `-march=native -ffast-math` 等を **`cpu-blas/Makefile`** で有効化。上記試行では出力テキストは両者で一致。
+`cpu-blas` は `-march=native -ffast-math` 等を **`cpu-blas/Makefile`** で有効化。上記 **`cpu-omp`** の数値は **Q1_0 融合導入前**（ブロック dequant 主体）の参考計測。融合反映後の再計測は未実施。試行時点では **`cpu-blas`** 出力テキストは **`cpu-omp`** と一致。
 
 ## ディレクトリとファイル構成
 
@@ -142,13 +142,13 @@ make build
 
 ## 実行時の挙動（CPU）
 
-以下の **参照実装（`cpu/main.c`）** の説明を基準とする。
+3 バリアント（**`cpu`** / **`cpu-omp`** / **`cpu-blas`**）は **Q1_0 融合 GEMV**・**RoPE**・**`chat_encode`** を共通とする。差分は並列化（OpenMP）と Attention / F32 行への OpenBLAS 利用（**`cpu-blas`** のみ）である。
 
 重みは **mmap した GGUF** 上の量子化 blob を参照する。**Q1_0** 行列積は **`mm_q1_0_rows`** で融合行内積（中間 FP32 ブロックなし）。**Q1_0 以外**の量子化型は出力行／ブロックごとに部分復元して内積する（全テンソルの float 一括展開はしない）。KV・活性は主に float。サンプリングはホスト上の logits に対して行う。
 
 **`-p` プロンプト**は **`chat_encode`** で ChatML 化する。GGUF **`tokenizer.chat_template`** の単一 user ターン + **`add_generation_prompt`** に合わせ、既定 system 文は挿入せず、assistant 開始は空 think ブロック付き（ソース内リテラル。PrismML **llama.cpp -cnv** と同趣旨）。
 
-**`cpu-omp`** は **`cpu`** と同趣旨だが、Q1_0 は現状ブロック dequant 主体のまま。**`chat_encode`**・RoPE 等も **`cpu`** と未同期の箇所がある。GEMV／RMSNorm の一部／マルチヘッドアテンション・活性結合などに **OpenMP parallel for** を入れたもの（細部は `cpu-omp/main.c` を参照）。
+**`cpu-omp`** は **`cpu`** と同アルゴリズムで、**`mm_q1_0_rows`** の行ループなどに **OpenMP parallel for** を入れたもの（細部は `cpu-omp/main.c` を参照）。
 
 **`cpu-blas`** は次を追加する（細部は `cpu-blas/main.c` を参照）。
 
@@ -198,16 +198,16 @@ make build
 **Q1_0** は **QK1_0=128** 要素を単位とする。
 
 - **`cpu`**: **`dot_q1_0_row`** / **`mm_q1_0_rows`** で融合行内積（`ggml-quants.c` の dequantize + 内積と同等、中間 FP32 ブロックなし）。
-- **`cpu-omp`**: 現状は行／ブロック単位で `BlockQ1_0` を float に戻して内積（**`cpu`** の Q1_0 融合は未追随）。
-- **`cpu-blas`**: **`cpu`** と同趣旨の **`dot_q1_0_row`** 融合内積（OpenBLAS 併用）。
+- **`cpu-omp`**: 同上。行ループを **`#pragma omp parallel for`** で並列化。
+- **`cpu-blas`**: **`cpu-omp`** と同趣旨の **`dot_q1_0_row`** 融合内積（OpenBLAS 併用）。
 
 ### RoPE
 
-llama.cpp 系の NeoX 半分ペア配置に合わせ、YARN 等のメタがあれば `rope_scaling` 関連フィールドで処理。**`finalize_rope_hparams`**（**`cpu/main.c`**）では **llama-context.cpp** と同様、**`yarn_ext_factor != 0`** のとき **`yarn_attn_factor`** を確定する（詳細はソース内 `rope_apply` / `finalize_rope_hparams`）。
+llama.cpp 系の NeoX 半分ペア配置に合わせ、YARN 等のメタがあれば `rope_scaling` 関連フィールドで処理。**`finalize_rope_hparams`**（3 バリアント共通）では **llama-context.cpp** と同様、**`yarn_ext_factor != 0`** のとき **`yarn_attn_factor`** を確定する（詳細はソース内 `rope_apply` / `finalize_rope_hparams`）。
 
 ### トークナイザ・チャット
 
-GPT-2 系 BPE と特殊トークン。**`cpu/main.c`** の **`chat_encode`** は GGUF **`tokenizer.chat_template`**（Qwen3 / Bonsai）に合わせ、**user** 1 ターン + assistant 生成プレフィックス（空 think ブロック付きリテラル）のみを組み立てる。既定 system 文は挿入しない。
+GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_encode`** は GGUF **`tokenizer.chat_template`**（Qwen3 / Bonsai）に合わせ、**user** 1 ターン + assistant 生成プレフィックス（空 think ブロック付きリテラル）のみを組み立てる。既定 system 文は挿入しない。
 
 ### 生成ループとサンプリング
 
@@ -221,9 +221,8 @@ GPT-2 系 BPE と特殊トークン。**`cpu/main.c`** の **`chat_encode`** は
 
 ## 制約・既知の制限
 
-- **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は Q1_0 融合内積で dequant オーバーヘッドを削減したが、依然として参考実装・検証向け。**`cpu-omp`** 単体では Q1_0 行 GEMV がブロック dequant 主体のままとなり、実測ではスループットが低いことがある（本設計書の参考ベンチマーク参照）。実用的な試行は **`cpu-blas`**（OpenBLAS + 融合 Q1_0）を推奨。
-- **`cpu-omp`** / **`cpu-blas`** は **`chat_encode`**・RoPE **`yarn_attn_factor`** 等が **`cpu/main.c`** と未同期の箇所があり、**`-p` 同一でも生成トークン列が一致しない**ことがある（参照実装は **`cpu`**）。
-- **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。`-ffast-math` 使用のため、環境によっては `cpu-omp` と数値がわずかに異なり得る。
+- **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け。**`cpu-omp`** は Q1_0 融合を導入済みだが、本設計書の参考ベンチマーク（161.7 s）は融合前の計測。実用的な試行は **`cpu-blas`**（OpenBLAS + Attention `sgemv` 集約）を推奨。
+- **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。`-ffast-math` 使用のため、環境によっては **`cpu-omp`** と数値がわずかに異なり得る。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。
@@ -234,7 +233,7 @@ GPT-2 系 BPE と特殊トークン。**`cpu/main.c`** の **`chat_encode`** は
 - **`doc/design.md`（本書）**: 設計・仕様の静的説明。
 - **`doc/ChangeLog`**: 履歴。
 
-実装の最終的な挙動は **`bonsai-8b/cpu/main.c`** のソースを正とする。**`cpu-omp`** / **`cpu-blas`** は派生であり、**`chat_encode`**・RoPE 確定・Q1_0 カーネル等が **`cpu`** とずれている場合がある。浮動小数の結合順などでも数値差が出うる。スループット比較の際はビルドフラグ（`-march=native`、`-ffast-math`）と OpenBLAS スレッド設定に注意する。
+実装の最終的な挙動は **`bonsai-8b/cpu/main.c`** のソースを正とする。**`cpu-omp`** / **`cpu-blas`** は派生だが、**Q1_0 融合**・**`chat_encode`**・RoPE は **`cpu`** と揃えている。差分は主に OpenMP 並列化と **`cpu-blas`** の OpenBLAS 利用。浮動小数の結合順などで数値差が出うる。スループット比較の際はビルドフラグ（`-march=native`、`-ffast-math`）と OpenBLAS スレッド設定に注意する。
 
 ## 補足：`design.md` 更新時のチェックリスト
 

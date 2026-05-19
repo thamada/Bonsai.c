@@ -16,6 +16,7 @@
  *     IEEE 754 の符号ビットを XOR で反転して ±x[j] を直接累積する（ブランチレス）。
  *     -ffast-math + -march=native と組み合わせて SIMD 化を狙う。
  *   - 他の量子化型・F16 は cpu-omp と同じ汎用パスを維持。
+ * チャット: GGUF tokenizer.chat_template（Qwen3）の user + 空 think ブロック付き assistant 開始。
  */
 
 #include <stdio.h>
@@ -942,7 +943,8 @@ static void finalize_rope_hparams(Config *c)
         c->n_ctx_orig_yarn = (c->n_ctx_train > 0) ? c->n_ctx_train : 8192;
 
     float attn = 1.0f;
-    if (c->yarn_ext_factor != 0.0f && c->rope_scaling_kind == ROPE_SCL_YARN) {
+    /* llama-context.cpp: yarn_ext_factor != 0 のとき attn_factor を確定 */
+    if (c->yarn_ext_factor != 0.0f) {
         float stretch = (c->rope_freq_scale > 0.0f) ? (1.0f / c->rope_freq_scale) : 1.0f;
         if (c->rope_yarn_log_mul != 0.0f) {
             float mall = c->rope_yarn_log_mul;
@@ -1198,14 +1200,14 @@ static void append_bpe(Tok *tk, int *out, int *n, const char *text) {
     free(t);
 }
 
+/*
+ * GGUF tokenizer.chat_template（Qwen3 / Bonsai）の単一 user ターン + 生成プレフィックスに合わせる。
+ * 既定 system 文は挿入しない。assistant 開始は空の think ブロック付き
+ *（add_generation_prompt 相当。PrismML llama.cpp -cnv と同じ）。
+ */
 static int *chat_encode(Tok *tk, const char *prompt, int *out_n) {
     int *toks = (int *)malloc(MAX_PROMPT_TOKS * sizeof(int));
     int n = 0;
-
-    if (tk->im_start >= 0) toks[n++] = tk->im_start;
-    append_bpe(tk, toks, &n, "system\nYou are a helpful assistant.");
-    if (tk->im_end >= 0) toks[n++] = tk->im_end;
-    append_bpe(tk, toks, &n, "\n");
 
     if (tk->im_start >= 0) toks[n++] = tk->im_start;
     append_bpe(tk, toks, &n, "user\n");
@@ -1214,7 +1216,11 @@ static int *chat_encode(Tok *tk, const char *prompt, int *out_n) {
     append_bpe(tk, toks, &n, "\n");
 
     if (tk->im_start >= 0) toks[n++] = tk->im_start;
-    append_bpe(tk, toks, &n, "assistant\n");
+    /* GGUF chat_template add_generation_prompt と同じリテラル */
+    append_bpe(tk, toks, &n,
+        "assistant\n"
+        "\x3c\x7cthink\x7c\x3e\n\n"
+        "\x3c\x2fthink\x7c\x3e\n\n");
 
     *out_n = n;
     return toks;
