@@ -235,8 +235,9 @@ make run.cpu-blas PROMPT="Hello"
 | CPU | AMD Ryzen AI 5 340 (12 logical cores) |
 | OS | Linux |
 | Model | `Bonsai-8B-Q1_0.gguf` (pre-read, in RAM) |
-| Command | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
-| Measured | 18 prompt tokens + **16 generated tokens**. Throughput is **decode phase only** (`Decode complete` line on stderr) |
+| Command | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` (`-n` = decode cap, `-t` = temperature) |
+| Workload | prefill **18** tokens (`-p "Hello"` + chat template) + decode **16** tokens (`-n 16`) |
+| Table metric | decode time and tok/s only (`Decode complete` on stderr; prefill excluded) |
 | Environment | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`; `cpu-blas` also `OPENBLAS_NUM_THREADS=1` |
 | Method | One warmup run per binary, then **best of 3** decode tok/s (GGUF pre-read in RAM) |
 

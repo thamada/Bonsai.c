@@ -232,8 +232,9 @@ make run.cpu-blas PROMPT="Hello"
 | CPU | AMD Ryzen AI 5 340（12 論理コア） |
 | OS | Linux |
 | モデル | `Bonsai-8B-Q1_0.gguf` (pre-read, in RAM) |
-| コマンド | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
-| 計測 | プロンプト 18 トークン + **生成 16 トークン**。スループットは **decode 区間**（stderr の `Decode complete` 行） |
+| コマンド | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0`（`-n` は decode 上限、`-t` は温度） |
+| ワークロード | prefill **18** トークン（`-p "Hello"` + chat テンプレート）+ decode **16** トークン（`-n 16`） |
+| 表の指標 | decode 時間・tok/s のみ（stderr の `Decode complete` 行。prefill は含めない） |
 | 環境変数 | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`、`cpu-blas` のみ `OPENBLAS_NUM_THREADS=1` |
 | 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最高** decode tok/s (GGUF pre-read in RAM) |
 
