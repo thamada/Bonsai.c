@@ -34,20 +34,25 @@
 
 ### 参考ベンチマーク（開発環境・2026-05-19）
 
-環境依存の参考値。詳細は **`README.md`** の「参考ベンチマーク」も参照。
+環境依存の参考値。CPU・メモリ・ビルドフラグ・ページキャッシュで大きく変わる。手順の全文は **`README.md`** / **`README.en.md`** の「参考ベンチマーク」を参照。
 
 | 項目 | 値 |
 |------|-----|
 | CPU | AMD Ryzen AI 5 340（12 論理コア） |
+| OS | Linux |
 | モデル | `Bonsai-8B-Q1_0.gguf`（ページキャッシュ温） |
-| コマンド | `-p "Hello" -n 16 -t 0`（生成 15 トークンで EOS 打ち切り） |
+| コマンド | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
+| 計測 | プロンプト 18 トークン + **生成 16 トークン**（バイナリ表示の集計） |
+| 環境変数 | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`、`cpu-blas` のみ `OPENBLAS_NUM_THREADS=1` |
+| 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最短**（GGUF は事前にページキャッシュ温） |
 
-| バイナリ | 合計時間 | 生成スループット |
-|----------|----------:|-----------------:|
-| `bonsai-cpu-omp` | 161.7 s | 0.09 tok/s |
-| `bonsai-cpu-blas` | 8.4 s | 1.79 tok/s（約 20 倍） |
+| バイナリ | 合計時間 | 生成スループット | 備考 |
+|----------|----------:|-----------------:|------|
+| `bonsai-cpu` | 132.0 s | 0.12 tok/s | 単スレッド、`-O3`（`cpu/Makefile` 既定） |
+| `bonsai-cpu-omp` | 21.5 s | 0.74 tok/s | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
+| `bonsai-cpu-blas` | 2.6 s | 6.15 tok/s | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
 
-`cpu-blas` は `-march=native -funroll-loops -ffast-math -mfma` 等を **`cpu-blas/Makefile`** で有効化。上記 **`cpu-omp`** の数値は **Q1_0 融合導入前**（ブロック dequant 主体）の参考計測。融合反映後の再計測は未実施。**`cpu-blas`** の Q1_0 は **Q8_0 活性化 + SIMD 内積**（llama.cpp 準拠）に更新済みだが、本表の **`cpu-blas`** 数値は旧カーネル（符号 XOR 融合）時点の参考値。再ベンチマークは未実施。
+この条件下では **`cpu-blas` が `cpu-omp` の約 8 倍**、**`cpu` の約 51 倍**の生成スループット（`cpu-omp` は `cpu` の約 6 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致。`cpu-blas` の Q1_0 は **Q8_0 活性化 + AVX2 内積**（llama.cpp 準拠）。
 
 ## ディレクトリとファイル構成
 
@@ -221,7 +226,7 @@ GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_enc
 
 ## 制約・既知の制限
 
-- **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け。**`cpu-omp`** は Q1_0 融合を導入済みだが、本設計書の参考ベンチマーク（161.7 s）は融合前の計測。実用的な試行は **`cpu-blas`**（OpenBLAS + Attention `sgemv` 集約）を推奨。
+- **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記参考計測 132.0 s / 0.12 tok/s）。**`cpu-omp`** は 21.5 s / 0.74 tok/s 程度。実用的な試行は **`cpu-blas`**（OpenBLAS + Q1_0 Q8_0 SIMD + Attention `sgemv` 集約、参考 2.6 s / 6.15 tok/s）を推奨。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る（Q1_0 経路自体も **Q8_0 化**と異なる）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
