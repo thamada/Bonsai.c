@@ -4,6 +4,12 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-19 16:29:42
+
+**ドキュメント**: **`README.md`** / **`README.en.md`** / **`doc/design.md`** — 参考ベンチマーク表のスループット指標を **decode 区間専用 tok/s**（stderr の `Decode complete` 行）に変更。列見出しを「合計時間／生成スループット」から「decode 時間／decode スループット」へ更新。再現手順を 3 回計測の**最高** decode tok/s に明記。3 バイナリを再計測（AMD Ryzen AI 5 340・Linux・`Bonsai-8B-Q1_0.gguf`・`-p "Hello" -n 16 -t 0`・`OMP_NUM_THREADS=12`・ページキャッシュ温・各 1 回ウォームアップ後 3 回）。**`bonsai-cpu`** decode 60.0 s（**0.27 tok/s**）、**`bonsai-cpu-omp`** 9.7 s（**1.65 tok/s**）、**`bonsai-cpu-blas`** 1.1 s（**14.27 tok/s**、`cpu-omp` の約 9 倍・`cpu` の約 53 倍）。旧表の「生成 ÷ 合計時間」指標（例: `cpu-blas` 6.67 tok/s）は prefill 込みのため decode 専用値より低く見えていた旨を **`doc/design.md`** のスループット定義に反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-19 16:09:37
 
 **UX・単一ファイル化**: **`bonsai-8b/cpu/main.c`** / **`cpu-omp/main.c`** / **`cpu-blas/main.c`** — 推論時の **prefill プログレスバー**（stderr・`\r` 更新）、**prefill / decode 完了メッセージ**（各フェーズの tok/s）、**最終スループット集計**（prefill のみ・decode のみ・合計の 3 種 tok/s）を **3 バリアント共通**で追加。生成テキストは stdout、進捗・計測は stderr。進捗用ヘルパは各 **`main.c` 内の static 関数**（共有ヘッダなし）。**`cpu/main.c`** から **`load_profile.h`** 依存を削除し **`malloc` / `calloc`** に統一（**`cpu-omp`** / **`cpu-blas`** と同様に **単一ソースファイル**でビルド可能）。

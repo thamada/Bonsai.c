@@ -42,17 +42,17 @@
 | OS | Linux |
 | モデル | `Bonsai-8B-Q1_0.gguf`（ページキャッシュ温） |
 | コマンド | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
-| 計測 | プロンプト 18 トークン + **生成 16 トークン**（バイナリ表示の集計） |
+| 計測 | プロンプト 18 トークン + **生成 16 トークン**。スループットは **decode 区間**（stderr の `Decode complete` 行） |
 | 環境変数 | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`、`cpu-blas` のみ `OPENBLAS_NUM_THREADS=1` |
-| 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最短**（GGUF は事前にページキャッシュ温） |
+| 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最高** decode tok/s（GGUF は事前にページキャッシュ温） |
 
-| バイナリ | 合計時間 | 生成スループット | 備考 |
+| バイナリ | decode 時間 | decode スループット | 備考 |
 |----------|----------:|-----------------:|------|
-| `bonsai-cpu` | 132.0 s | 0.12 tok/s | 単スレッド、`-O3`（`cpu/Makefile` 既定） |
-| `bonsai-cpu-omp` | 21.5 s | 0.74 tok/s | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
-| `bonsai-cpu-blas` | 2.6 s | 6.15 tok/s | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
+| `bonsai-cpu` | 60.0 s | 0.27 tok/s | 単スレッド、`-O3`（`cpu/Makefile` 既定） |
+| `bonsai-cpu-omp` | 9.7 s | 1.65 tok/s | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
+| `bonsai-cpu-blas` | 1.1 s | 14.27 tok/s | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
 
-この条件下では **`cpu-blas` が `cpu-omp` の約 8 倍**、**`cpu` の約 51 倍**の生成スループット（`cpu-omp` は `cpu` の約 6 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致。`cpu-blas` の Q1_0 は **Q8_0 活性化 + AVX2 内積**（llama.cpp 準拠）。
+この条件下では **`cpu-blas` が `cpu-omp` の約 9 倍**、**`cpu` の約 53 倍**の decode スループット（`cpu-omp` は `cpu` の約 6 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致。`cpu-blas` の Q1_0 は **Q8_0 活性化 + AVX2 内積**（llama.cpp 準拠）。
 
 ## ディレクトリとファイル構成
 
@@ -172,7 +172,7 @@ make build
 - **decode**: トークン数 **`gen`**（サンプリングで出力した数）÷ decode 専用時間（prefill 終了直後〜ループ終了）
 - **total**: **`(n_prompt + gen)`** ÷ 全体 wall time（`generate` 開始〜終了）
 
-参考ベンチマーク表の tok/s は **生成区間のみ・合計時間ベース**の旧表示に相当する場合がある。CLI の **decode** / **total** 行で区間別に確認する。
+参考ベンチマーク表の tok/s は **decode 区間**（`Decode complete` 行）の tok/s。prefill / total は CLI の `--- throughput ---` で別途確認する。
 
 **`cpu-omp`** は **`cpu`** と同アルゴリズムで、**`mm_q1_0_rows`** の行ループなどに **OpenMP parallel for** を入れたもの（細部は `cpu-omp/main.c` を参照）。
 
@@ -247,7 +247,7 @@ GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_enc
 
 ## 制約・既知の制限
 
-- **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記参考計測 132.0 s / 0.12 tok/s）。**`cpu-omp`** は 21.5 s / 0.74 tok/s 程度。実用的な試行は **`cpu-blas`**（OpenBLAS + Q1_0 Q8_0 SIMD + Attention `sgemv` 集約、参考 2.6 s / 6.15 tok/s）を推奨。
+- **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記参考計測 decode **0.27 tok/s**）。**`cpu-omp`** は decode **1.65 tok/s** 程度。実用的な試行は **`cpu-blas`**（OpenBLAS + Q1_0 Q8_0 SIMD + Attention `sgemv` 集約、参考 decode **14.27 tok/s**）を推奨。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る（Q1_0 経路自体も **Q8_0 化**と異なる）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。

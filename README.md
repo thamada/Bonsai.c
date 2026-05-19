@@ -233,17 +233,17 @@ make run.cpu-blas PROMPT="Hello"
 | OS | Linux |
 | モデル | `Bonsai-8B-Q1_0.gguf`（ページキャッシュ温） |
 | コマンド | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
-| 計測 | プロンプト 18 トークン + **生成 16 トークン**（バイナリ表示の集計） |
+| 計測 | プロンプト 18 トークン + **生成 16 トークン**。スループットは **decode 区間**（stderr の `Decode complete` 行） |
 | 環境変数 | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`、`cpu-blas` のみ `OPENBLAS_NUM_THREADS=1` |
-| 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最短**（GGUF は事前にページキャッシュ温） |
+| 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最高** decode tok/s（GGUF は事前にページキャッシュ温） |
 
-| バイナリ | 合計時間 | 生成スループット | 備考 |
+| バイナリ | decode 時間 | decode スループット | 備考 |
 |---|---:|---:|---|
-| `cpu/bonsai-cpu` | 132.0 s | **0.12 tok/s** | 単スレッド、`-O3`（`cpu/Makefile` 既定） |
-| `cpu-omp/bonsai-cpu-omp` | 21.5 s | **0.74 tok/s** | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
-| `cpu-blas/bonsai-cpu-blas` | 2.6 s | **6.15 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
+| `cpu/bonsai-cpu` | 60.0 s | **0.27 tok/s** | 単スレッド、`-O3`（`cpu/Makefile` 既定） |
+| `cpu-omp/bonsai-cpu-omp` | 9.7 s | **1.65 tok/s** | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
+| `cpu-blas/bonsai-cpu-blas` | 1.1 s | **14.27 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
 
-この条件下では **`cpu-blas` が `cpu-omp` の約 8 倍**、**`cpu` の約 51 倍**の生成スループットでした（`cpu-omp` は `cpu` の約 6 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致しています。`-ffast-math` により浮動小数の結合順は `cpu-omp` と異なり得ますが、上記試行では同一出力でした。
+この条件下では **`cpu-blas` が `cpu-omp` の約 9 倍**、**`cpu` の約 53 倍**の decode スループットでした（`cpu-omp` は `cpu` の約 6 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致しています。`-ffast-math` により浮動小数の結合順は `cpu-omp` と異なり得ますが、上記試行では同一出力でした。
 
 ## よく使うオプション
 

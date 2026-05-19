@@ -236,17 +236,17 @@ make run.cpu-blas PROMPT="Hello"
 | OS | Linux |
 | Model | `Bonsai-8B-Q1_0.gguf` (warm page cache) |
 | Command | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
-| Measured | 18 prompt tokens + **16 generated tokens** (per binary summary line) |
+| Measured | 18 prompt tokens + **16 generated tokens**. Throughput is **decode phase only** (`Decode complete` line on stderr) |
 | Environment | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`; `cpu-blas` also `OPENBLAS_NUM_THREADS=1` |
-| Method | One warmup run per binary, then **best of 3** timed runs (GGUF page cache warmed beforehand) |
+| Method | One warmup run per binary, then **best of 3** decode tok/s (GGUF page cache warmed beforehand) |
 
-| Binary | Total time | Generation throughput | Notes |
+| Binary | Decode time | Decode throughput | Notes |
 |---|---:|---:|---|
-| `cpu/bonsai-cpu` | 132.0 s | **0.12 tok/s** | Single-threaded, `-O3` (`cpu/Makefile` defaults) |
-| `cpu-omp/bonsai-cpu-omp` | 21.5 s | **0.74 tok/s** | `-O3 -fopenmp` (`cpu-omp/Makefile` defaults) |
-| `cpu-blas/bonsai-cpu-blas` | 2.6 s | **6.15 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`, OpenBLAS at 1 thread |
+| `cpu/bonsai-cpu` | 60.0 s | **0.27 tok/s** | Single-threaded, `-O3` (`cpu/Makefile` defaults) |
+| `cpu-omp/bonsai-cpu-omp` | 9.7 s | **1.65 tok/s** | `-O3 -fopenmp` (`cpu-omp/Makefile` defaults) |
+| `cpu-blas/bonsai-cpu-blas` | 1.1 s | **14.27 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`, OpenBLAS at 1 thread |
 
-Under these conditions, **`cpu-blas` was about 8× faster than `cpu-omp`** and **about 51× faster than `cpu`** (`cpu-omp` was about 6× faster than `cpu`). Generated text (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`) matched on all three binaries. `-ffast-math` allows different FP reduction order than `cpu-omp`; output still matched in this run.
+Under these conditions, **`cpu-blas` was about 9× faster than `cpu-omp`** and **about 53× faster than `cpu`** (`cpu-omp` was about 6× faster than `cpu`). Generated text (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`) matched on all three binaries. `-ffast-math` allows different FP reduction order than `cpu-omp`; output still matched in this run.
 
 ## Common CLI options
 
