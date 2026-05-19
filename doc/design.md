@@ -34,17 +34,17 @@
 
 ### 参考ベンチマーク（開発環境・2026-05-19）
 
-環境依存の参考値。CPU・メモリ・ビルドフラグ・ページキャッシュで大きく変わる。手順の全文は **`README.md`** / **`README.en.md`** の「参考ベンチマーク」を参照。
+環境依存の参考値。CPU・メモリ・ビルドフラグ・GGUF が RAM にあるかで大きく変わる。手順の全文は **`README.md`** / **`README.en.md`** の「参考ベンチマーク」を参照。
 
 | 項目 | 値 |
 |------|-----|
 | CPU | AMD Ryzen AI 5 340（12 論理コア） |
 | OS | Linux |
-| モデル | `Bonsai-8B-Q1_0.gguf`（ページキャッシュ温） |
+| モデル | `Bonsai-8B-Q1_0.gguf` (pre-read, in RAM) |
 | コマンド | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
 | 計測 | プロンプト 18 トークン + **生成 16 トークン**。スループットは **decode 区間**（stderr の `Decode complete` 行） |
 | 環境変数 | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`、`cpu-blas` のみ `OPENBLAS_NUM_THREADS=1` |
-| 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最高** decode tok/s（GGUF は事前にページキャッシュ温） |
+| 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最高** decode tok/s (GGUF pre-read in RAM) |
 
 | バイナリ | decode 時間 | decode スループット | 備考 |
 |----------|----------:|-----------------:|------|

@@ -227,18 +227,18 @@ make run.cpu-blas PROMPT="Hello"
 
 ## Reference benchmark
 
-**Reference numbers from one development machine**—your results will vary with CPU, memory, compiler flags, and page-cache warmth. Re-run with the same GGUF and command to compare.
+**Reference numbers from one development machine**—your results will vary with CPU, memory, compiler flags, and whether the GGUF is already in RAM. Re-run with the same GGUF and command to compare.
 
 | Item | Value |
 |---|---|
 | Date | 2026-05-19 |
 | CPU | AMD Ryzen AI 5 340 (12 logical cores) |
 | OS | Linux |
-| Model | `Bonsai-8B-Q1_0.gguf` (warm page cache) |
+| Model | `Bonsai-8B-Q1_0.gguf` (pre-read, in RAM) |
 | Command | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
 | Measured | 18 prompt tokens + **16 generated tokens**. Throughput is **decode phase only** (`Decode complete` line on stderr) |
 | Environment | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`; `cpu-blas` also `OPENBLAS_NUM_THREADS=1` |
-| Method | One warmup run per binary, then **best of 3** decode tok/s (GGUF page cache warmed beforehand) |
+| Method | One warmup run per binary, then **best of 3** decode tok/s (GGUF pre-read in RAM) |
 
 | Binary | Decode time | Decode throughput | Notes |
 |---|---:|---:|---|
