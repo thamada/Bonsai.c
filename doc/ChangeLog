@@ -4,6 +4,18 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-19 12:48:57
+
+**最適化・整合**: **`bonsai-8b/cpu/main.c`**（参照実装）— **Q1_0 融合行内積**（**`dot_q1_0_row`** / **`mm_q1_0_rows`**）。`ggml-quants.c` の dequantize + 内積と同等だが中間 FP32 ブロックを経由しない（符号ビットと入力 **`x[j]`** の IEEE 754 符号 XOR）。**`mm_quant_rows`** の **Q1_0** 分岐で使用。
+
+**RoPE**: **`finalize_rope_hparams`** の **`yarn_attn_factor`** 確定条件を **llama-context.cpp** に合わせ、**`yarn_ext_factor != 0`** のみで適用（**`rope_scaling_kind == ROPE_SCL_YARN`** ガードを削除）。
+
+**チャット**: **`chat_encode`** を GGUF **`tokenizer.chat_template`**（Qwen3 / Bonsai）の **単一 user ターン + `add_generation_prompt`** に整合。既定 **system** 文を挿入しない。**assistant** 開始は空 think ブロック付きリテラル（ソース内 `assistant\n` + think 開始/終了タグ + 改行、PrismML **llama.cpp -cnv** と同趣旨）。
+
+**`doc/design.md`**: 上記（Q1_0 融合・RoPE・**`chat_encode`**）を **`cpu/main.c`** 向けに反映。**`cpu-omp`** / **`cpu-blas`** は本変更時点では未追随の旨を注記。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-19 03:15:05
 
 **追加・最適化**: **`bonsai-8b/cpu-blas/`**（**`main.c`** + **`Makefile`**）— **`cpu-omp`** をベースに **OpenMP + OpenBLAS** 版 **`bonsai-cpu-blas`**。起動時 **`openblas_set_num_threads(1)`** で BLAS は serial、並列は OpenMP に一本化。**Q1_0** 専用融合内積（`dot_q1_0_row` / `mm_q1_0_rows`）、Attention の **`cblas_sgemv`** 集約、F32 行の OpenMP 行帯 + serial **`sgemv`**。ビルドは **`-march=native -funroll-loops -ffast-math`**。
