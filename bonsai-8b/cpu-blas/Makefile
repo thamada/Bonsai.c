@@ -9,7 +9,7 @@ CC      ?= cc
 # -funroll-loops: 8-bit ごとの内側ループを展開
 # -ffast-math: FP 加算の結合則を許可（縮小総和を SIMD で並列化させる。LLM 推論用途では十分許容範囲）
 CFLAGS  ?= -O3 -std=c11 -Wall -Wextra -Wno-unused-parameter -fopenmp \
-           -march=native -funroll-loops -ffast-math
+           -march=native -funroll-loops -ffast-math -mfma
 LDFLAGS ?= -fopenmp -lopenblas -lm
 
 MODEL   ?= ../Bonsai-8B-Q1_0.gguf

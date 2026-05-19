@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-19 13:04:45
+
+**最適化**: **`bonsai-8b/cpu-blas/main.c`** — **Q1_0 GEMV** を llama.cpp 準拠の **Q8_0 活性化 + `vec_dot_q1_0_q8_0`** に変更（旧 **`dot_q1_0_row`** 符号 XOR 融合を廃止）。**`quantize_row_q8_0`**（AVX/AVX2 SIMD、非 SIMD は参照実装）、**`vec_dot_q1_0_q8_0`**（AVX2 時は **`ggml-cpu/arch/x86/quants.c`** 準拠、**`_mm256_maddubs_epi16`** + **FMA**）。**`State`** に **`BlockQ8_0 *q8`** を追加し **`mm`** 経路で使い回し。**`cpu`** / **`cpu-omp`** の Q1_0 融合は変更なし。
+
+**`bonsai-8b/cpu-blas/Makefile`**: **`-mfma`** を **`CFLAGS`** に追加。
+
+**`doc/design.md`**: **`cpu-blas`** の Q1_0 経路・ビルドフラグ・3 バリアントの Q1_0 差分・参考ベンチマーク注記を更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-19 12:55:29
 
 **追随**: **`bonsai-8b/cpu-omp/main.c`** — **`cpu/main.c`** と同内容を反映。**Q1_0 融合行内積**（**`dot_q1_0_row`** / **`mm_q1_0_rows`**、行ループは **`#pragma omp parallel for`**）。**RoPE** **`yarn_attn_factor`** 確定条件の修正。**`chat_encode`** を GGUF **`chat_template`** に整合。

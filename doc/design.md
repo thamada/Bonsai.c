@@ -10,7 +10,7 @@
 
 **PyTorch・TensorFlow・JAX・ONNX Runtime 等の ML ユーザランドにはリンクしない。** 基準経路のコアは **標準 C と `libm`** のみ。**GPU（ROCm/HIP）・AMD XDNA2 NPU** 向けの別 `main.c` は本リポジトリから**削除済み**。
 
-**CPU** については、**参照実装**として **`bonsai-8b/cpu/main.c`（単スレッド）** を保守し、**同ロジックを OpenMP で並列化した `bonsai-8b/cpu-omp/main.c`**（**`bonsai-cpu-omp`**）を検証用に、**OpenMP + OpenBLAS と Q1_0 融合カーネル**を用いた **`bonsai-8b/cpu-blas/main.c`**（**`bonsai-cpu-blas`**）を実用的スループット向けに提供する。
+**CPU** については、**参照実装**として **`bonsai-8b/cpu/main.c`（単スレッド）** を保守し、**同ロジックを OpenMP で並列化した `bonsai-8b/cpu-omp/main.c`**（**`bonsai-cpu-omp`**）を検証用に、**OpenMP + OpenBLAS と Q1_0×Q8_0 SIMD 内積**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠）を用いた **`bonsai-8b/cpu-blas/main.c`**（**`bonsai-cpu-blas`**）を実用的スループット向けに提供する。
 
 目的は、推論経路（GGUF 読み取り・量子化復元・Transformer forward・サンプリング）を **C の明示的なコードパス**として追い、改変しやすくすることである。学習・商用 SLA・公式実装との数値一致はスコープ外。
 
@@ -28,7 +28,7 @@
 |--------|----------|------|
 | `bonsai-8b/cpu/main.c` | **CPU、単スレッド** | GGUF mmap。**Q1_0** は融合行内積（**`dot_q1_0_row`**、中間 FP32 展開なし）。他量子化型はブロック単位で部分復元して GEMV。Norm 等は F32。`libm` のみ。 |
 | `bonsai-8b/cpu-omp/main.c` | **CPU、OpenMP マルチスレッド** | **`cpu`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は融合行内積（**`mm_q1_0_rows`** を OpenMP 行並列）。他量子化型はブロック dequant + OpenMP。Attention・SwiGLU 等も **OpenMP**。 |
-| `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一 GGUF・CLI・**`chat_encode`**・RoPE・**Q1_0 融合**。Attention はヘッドあたり **2 回の `cblas_sgemv`**。F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
+| `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は活性化を **Q8_0** 化して **`vec_dot_q1_0_q8_0`**（AVX2 時は ggml-cpu x86 準拠 SIMD、**`-mfma`**）。Attention はヘッドあたり **2 回の `cblas_sgemv`**。F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
 
 メタデータの照合は **GGUF 内の `qwen3.*` プレフィックス**（実装上のバイト列。`embedding_length` 等）と tokenizer 系キーで行う。実装コメントは「dense デコーダ」「Bonsai」と整合する。
 
@@ -47,7 +47,7 @@
 | `bonsai-cpu-omp` | 161.7 s | 0.09 tok/s |
 | `bonsai-cpu-blas` | 8.4 s | 1.79 tok/s（約 20 倍） |
 
-`cpu-blas` は `-march=native -ffast-math` 等を **`cpu-blas/Makefile`** で有効化。上記 **`cpu-omp`** の数値は **Q1_0 融合導入前**（ブロック dequant 主体）の参考計測。融合反映後の再計測は未実施。試行時点では **`cpu-blas`** 出力テキストは **`cpu-omp`** と一致。
+`cpu-blas` は `-march=native -funroll-loops -ffast-math -mfma` 等を **`cpu-blas/Makefile`** で有効化。上記 **`cpu-omp`** の数値は **Q1_0 融合導入前**（ブロック dequant 主体）の参考計測。融合反映後の再計測は未実施。**`cpu-blas`** の Q1_0 は **Q8_0 活性化 + SIMD 内積**（llama.cpp 準拠）に更新済みだが、本表の **`cpu-blas`** 数値は旧カーネル（符号 XOR 融合）時点の参考値。再ベンチマークは未実施。
 
 ## ディレクトリとファイル構成
 
@@ -57,10 +57,10 @@
 | `bonsai-8b/Makefile` | **`build.cpu`** / **`run.cpu`**、**`build.cpu-blas`** / **`run.cpu-blas`**、**`clean`**（`cpu`・`cpu-blas` を委譲）。**`cpu-omp` は未集約**（サブディレクトリの Makefile を直接使用）。 |
 | `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-omp/Makefile` | **`bonsai-cpu-omp`** の生成（`-fopenmp`）。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
-| `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、`-march=native -ffast-math` 等）。`pkg-config openblas` があれば `-I`/`-L` を自動付与。 |
+| `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、`-march=native -funroll-loops -ffast-math -mfma` 等）。`pkg-config openblas` があれば `-I`/`-L` を自動付与。 |
 | `bonsai-8b/cpu/main.c` | CPU 単スレッド推論の**参照ソース**（アルゴリズムの正として追う）。 |
 | `bonsai-8b/cpu-omp/main.c` | **`cpu/main.c` をベースに OpenMP を付与した派生**（挙動確認はまず `cpu` を正とする）。 |
-| `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0 融合内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。 |
+| `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL。 |
 | `bonsai-8b/hf-model.py` | （任意）`hf` CLI でダウンロード＋Hub LFS 検証。 |
 | `doc/design.md` | 本書。 |
@@ -142,9 +142,9 @@ make build
 
 ## 実行時の挙動（CPU）
 
-3 バリアント（**`cpu`** / **`cpu-omp`** / **`cpu-blas`**）は **Q1_0 融合 GEMV**・**RoPE**・**`chat_encode`** を共通とする。差分は並列化（OpenMP）と Attention / F32 行への OpenBLAS 利用（**`cpu-blas`** のみ）である。
+3 バリアントは **RoPE**・**`chat_encode`** を共通とする。**Q1_0** の行列積は **`cpu`** / **`cpu-omp`** が融合行内積（**`dot_q1_0_row`**）、**`cpu-blas`** が **Q8_0 活性化 + `vec_dot_q1_0_q8_0`**（llama.cpp 準拠）と異なる。差分は並列化（OpenMP）、Q1_0 カーネル、Attention / F32 行への OpenBLAS 利用（**`cpu-blas`** のみ）である。
 
-重みは **mmap した GGUF** 上の量子化 blob を参照する。**Q1_0** 行列積は **`mm_q1_0_rows`** で融合行内積（中間 FP32 ブロックなし）。**Q1_0 以外**の量子化型は出力行／ブロックごとに部分復元して内積する（全テンソルの float 一括展開はしない）。KV・活性は主に float。サンプリングはホスト上の logits に対して行う。
+重みは **mmap した GGUF** 上の量子化 blob を参照する。**`cpu`** / **`cpu-omp`** の **Q1_0** は **`mm_q1_0_rows`** で符号ビットと FP32 活性の融合行内積（中間 FP32 ブロックなし）。**`cpu-blas`** の **Q1_0** は **`mm_q1_0_rows`** が活性化 **`x`** を一度 **`quantize_row_q8_0`** し、各行を **`vec_dot_q1_0_q8_0`** で計算（**`State.q8`** バッファを使い回し）。**Q1_0 以外**の量子化型は出力行／ブロックごとに部分復元して内積する（全テンソルの float 一括展開はしない）。KV・活性は主に float。サンプリングはホスト上の logits に対して行う。
 
 **`-p` プロンプト**は **`chat_encode`** で ChatML 化する。GGUF **`tokenizer.chat_template`** の単一 user ターン + **`add_generation_prompt`** に合わせ、既定 system 文は挿入せず、assistant 開始は空 think ブロック付き（ソース内リテラル。PrismML **llama.cpp -cnv** と同趣旨）。
 
@@ -153,7 +153,7 @@ make build
 **`cpu-blas`** は次を追加する（細部は `cpu-blas/main.c` を参照）。
 
 1. **起動時**: `openblas_set_num_threads(1)` — BLAS 内部スレッドと OpenMP のネスト並列を避ける。
-2. **Q1_0 GEMV**（`mm_q1_0_rows` / `dot_q1_0_row`）: ブロックごとに `BlockQ1_0` を FP32 バッファへ展開せず、符号ビットと入力 `x[j]` の積を直接累積（`±d·x` を IEEE 754 符号 XOR で表現）。
+2. **Q1_0 GEMV**（`mm_q1_0_rows`）: 活性化を **`quantize_row_q8_0`**（AVX/AVX2 時は SIMD、それ以外は参照実装）で **Q8_0** 化し、各行を **`vec_dot_q1_0_q8_0`** で内積（**`ggml_vec_dot_q1_0_q8_0`** / **`ggml-cpu/arch/x86/quants.c`** 準拠。AVX2 時は **`_mm256_maddubs_epi16`** 等と **`-mfma`**）。`d` 行まとめて同一量子化済み **`q8`** を使い回す。
 3. **Attention**: ヘッドごとに K 行列（`(pos+1)×hd`、`lda=kv_dim`）と q の **`cblas_sgemv(NoTrans)`**、続けて V の **`cblas_sgemv(Trans)`** で出力ヘッドを得る（従来の `(pos+1)` 回の `sdot`/`saxpy` を集約）。
 4. **F32 行**（`mm_f32`）: OpenMP で行帯を分割し、帯内は serial `sgemv`。
 5. **その他量子化型・F16**: `cpu-omp` と同様の汎用パス（OpenMP 行並列 + ブロック dequant）。
@@ -171,7 +171,7 @@ make build
 
 ## アーキテクチャ（`cpu/main.c`）
 
-**`cpu-omp/main.c`** もモジュール分割・データ構造・推論フェーズは同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0 融合内積**でホットパスを置き換えた派生として読む。
+**`cpu-omp/main.c`** もモジュール分割・データ構造・推論フェーズは同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生として読む。
 
 ### レイヤー構成（概略）
 
@@ -199,7 +199,7 @@ make build
 
 - **`cpu`**: **`dot_q1_0_row`** / **`mm_q1_0_rows`** で融合行内積（`ggml-quants.c` の dequantize + 内積と同等、中間 FP32 ブロックなし）。
 - **`cpu-omp`**: 同上。行ループを **`#pragma omp parallel for`** で並列化。
-- **`cpu-blas`**: **`cpu-omp`** と同趣旨の **`dot_q1_0_row`** 融合内積（OpenBLAS 併用）。
+- **`cpu-blas`**: **`quantize_row_q8_0`** + **`vec_dot_q1_0_q8_0`**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠。AVX2 で SIMD、非 AVX2 は generic 参照）。**`State`** に **`BlockQ8_0 *q8`** を確保（`max(dim, hidden_dim) / QK8_0` ブロック）。
 
 ### RoPE
 
@@ -222,7 +222,7 @@ GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_enc
 ## 制約・既知の制限
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け。**`cpu-omp`** は Q1_0 融合を導入済みだが、本設計書の参考ベンチマーク（161.7 s）は融合前の計測。実用的な試行は **`cpu-blas`**（OpenBLAS + Attention `sgemv` 集約）を推奨。
-- **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。`-ffast-math` 使用のため、環境によっては **`cpu-omp`** と数値がわずかに異なり得る。
+- **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る（Q1_0 経路自体も **Q8_0 化**と異なる）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。
@@ -233,7 +233,7 @@ GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_enc
 - **`doc/design.md`（本書）**: 設計・仕様の静的説明。
 - **`doc/ChangeLog`**: 履歴。
 
-実装の最終的な挙動は **`bonsai-8b/cpu/main.c`** のソースを正とする。**`cpu-omp`** / **`cpu-blas`** は派生だが、**Q1_0 融合**・**`chat_encode`**・RoPE は **`cpu`** と揃えている。差分は主に OpenMP 並列化と **`cpu-blas`** の OpenBLAS 利用。浮動小数の結合順などで数値差が出うる。スループット比較の際はビルドフラグ（`-march=native`、`-ffast-math`）と OpenBLAS スレッド設定に注意する。
+実装の最終的な挙動は **`bonsai-8b/cpu/main.c`** のソースを正とする。**`cpu-omp`** は **`cpu`** と同一 Q1_0 融合・**`chat_encode`**・RoPE で OpenMP のみ追加。**`cpu-blas`** は **`chat_encode`**・RoPE は揃えるが、**Q1_0** は llama.cpp 準拠の **Q8_0 活性化 + SIMD 内積**を採用する。差分は OpenMP 並列化・Q1_0 カーネル・OpenBLAS 利用。浮動小数の結合順などで数値差が出うる。スループット比較の際はビルドフラグ（`-march=native`、`-ffast-math`、`-mfma`）と OpenBLAS スレッド設定に注意する。
 
 ## 補足：`design.md` 更新時のチェックリスト
 
