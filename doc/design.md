@@ -63,9 +63,9 @@
 | `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-omp/Makefile` | **`bonsai-cpu-omp`** の生成（`-fopenmp`）。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、`-march=native -funroll-loops -ffast-math -mfma` 等）。`pkg-config openblas` があれば `-I`/`-L` を自動付与。 |
-| `bonsai-8b/cpu/main.c` | CPU 単スレッド推論の**参照ソース**（アルゴリズムの正として追う）。 |
-| `bonsai-8b/cpu-omp/main.c` | **`cpu/main.c` をベースに OpenMP を付与した派生**（挙動確認はまず `cpu` を正とする）。 |
-| `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。 |
+| `bonsai-8b/cpu/main.c` | CPU 単スレッド推論の**参照ソース**（アルゴリズムの正として追う）。**単一 `main.c`**（標準 C + `libm` のみ）。 |
+| `bonsai-8b/cpu-omp/main.c` | **`cpu/main.c` をベースに OpenMP を付与した派生**（挙動確認はまず `cpu` を正とする）。**単一 `main.c`**（+ OpenMP）。 |
+| `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。**単一 `main.c`**（+ OpenMP + OpenBLAS）。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL。 |
 | `bonsai-8b/hf-model.py` | （任意）`hf` CLI でダウンロード＋Hub LFS 検証。 |
 | `doc/design.md` | 本書。 |
@@ -153,6 +153,27 @@ make build
 
 **`-p` プロンプト**は **`chat_encode`** で ChatML 化する。GGUF **`tokenizer.chat_template`** の単一 user ターン + **`add_generation_prompt`** に合わせ、既定 system 文は挿入せず、assistant 開始は空 think ブロック付き（ソース内リテラル。PrismML **llama.cpp -cnv** と同趣旨）。
 
+### 進捗表示とスループット計測（3 バリアント共通）
+
+**`generate()`** 内の static ヘルパ（各 **`main.c` にインライン**。共有ヘッダは使わない）で、次の順に出力する。
+
+| タイミング | ストリーム | 内容 |
+|------------|------------|------|
+| prefill 中 | stderr | `\r` で更新するプログレスバー `Prefill [====...] N% (done/total)` |
+| prefill 完了 | stderr | `Prefill complete: <n_prompt> tokens in <sec>s (<tok/s>)` |
+| decode 中 | stdout | 生成トークンを逐次表示（`print_tok`） |
+| decode 完了 | stderr | 生成テキストの直後に改行を入れ、`Decode complete: <gen> tokens in <sec>s (<tok/s>)` |
+| 全体終了 | stdout | `--- <n_prompt> prompt tokens + <gen> generated tokens ---` と `--- <sec>s total ---` |
+| 全体終了 | stderr | `--- throughput ---` の下に **prefill / decode / total** の 3 行（tok/s） |
+
+スループットの定義:
+
+- **prefill**: トークン数 **`n_prompt`** ÷ prefill 専用時間（最初のプロンプト forward 完了まで）
+- **decode**: トークン数 **`gen`**（サンプリングで出力した数）÷ decode 専用時間（prefill 終了直後〜ループ終了）
+- **total**: **`(n_prompt + gen)`** ÷ 全体 wall time（`generate` 開始〜終了）
+
+参考ベンチマーク表の tok/s は **生成区間のみ・合計時間ベース**の旧表示に相当する場合がある。CLI の **decode** / **total** 行で区間別に確認する。
+
 **`cpu-omp`** は **`cpu`** と同アルゴリズムで、**`mm_q1_0_rows`** の行ループなどに **OpenMP parallel for** を入れたもの（細部は `cpu-omp/main.c` を参照）。
 
 **`cpu-blas`** は次を追加する（細部は `cpu-blas/main.c` を参照）。
@@ -176,7 +197,7 @@ make build
 
 ## アーキテクチャ（`cpu/main.c`）
 
-**`cpu-omp/main.c`** もモジュール分割・データ構造・推論フェーズは同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生として読む。
+3 バリアントとも **1 ファイルの `main.c`** に実装を集約する（バリアント間でソースを `#include` しない）。**`cpu-omp/main.c`** はデータ構造・推論フェーズは **`cpu`** と同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生として読む。
 
 ### レイヤー構成（概略）
 
@@ -216,7 +237,7 @@ GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_enc
 
 ### 生成ループとサンプリング
 
-温度・top-p・greedy 等の分岐は CPU 上で logits に対して実施。乱数は実装の xorshift 系 state を使用。
+プロンプト区間（**prefill**）は teacher forcing、続く **decode** 区間は logits からサンプリング。温度・top-p 等の分岐は CPU 上で logits に対して実施。乱数は実装の xorshift 系 state を使用。進捗・区間別 tok/s は上記「進捗表示とスループット計測」を参照。
 
 ## モデル参照
 

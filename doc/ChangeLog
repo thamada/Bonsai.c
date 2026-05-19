@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-19 16:09:37
+
+**UX・単一ファイル化**: **`bonsai-8b/cpu/main.c`** / **`cpu-omp/main.c`** / **`cpu-blas/main.c`** — 推論時の **prefill プログレスバー**（stderr・`\r` 更新）、**prefill / decode 完了メッセージ**（各フェーズの tok/s）、**最終スループット集計**（prefill のみ・decode のみ・合計の 3 種 tok/s）を **3 バリアント共通**で追加。生成テキストは stdout、進捗・計測は stderr。進捗用ヘルパは各 **`main.c` 内の static 関数**（共有ヘッダなし）。**`cpu/main.c`** から **`load_profile.h`** 依存を削除し **`malloc` / `calloc`** に統一（**`cpu-omp`** / **`cpu-blas`** と同様に **単一ソースファイル**でビルド可能）。
+
+**`doc/design.md`**: 進捗表示・スループット計測・単一ファイル方針を追記。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-19 13:37:14
 
 **ドキュメント**: **`README.md`** / **`README.en.md`** / **`doc/design.md`** — 参考ベンチマークを再計測して更新（AMD Ryzen AI 5 340・Linux・`Bonsai-8B-Q1_0.gguf`・`-p "Hello" -n 16 -t 0`・プロンプト 18 + 生成 16 トークン・`OMP_NUM_THREADS=12`・ページキャッシュ温・各バイナリ 1 回ウォームアップ後 3 回の最短）。**`bonsai-cpu`** 132.0 s（0.12 tok/s）、**`bonsai-cpu-omp`** 21.5 s（0.74 tok/s）、**`bonsai-cpu-blas`** 2.6 s（6.15 tok/s、`cpu-omp` の約 8 倍・`cpu` の約 51 倍）。3 バイナリの生成テキスト一致を記載。

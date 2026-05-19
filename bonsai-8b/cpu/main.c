@@ -828,7 +828,7 @@ static unsigned int hash_bytes(const char *s, int len) {
 
 static void tok_build_hash(Tok *tk) {
     tk->htab_sz = tk->size * 2;
-    tk->htab = (int *)malloc(tk->htab_sz * sizeof(int));
+    tk->htab = (int *)malloc((size_t)tk->htab_sz * sizeof(int));
     for (int i = 0; i < tk->htab_sz; i++) tk->htab[i] = -1;
     for (int i = 0; i < tk->size; i++) {
         unsigned int h = hash_bytes(tk->vocab[i], tk->vlen[i]) % tk->htab_sz;
@@ -1056,8 +1056,8 @@ static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
             uint64_t n = ru64(&r);
             tk->size = (int)n;
             c->vocab_size = (int)n;
-            tk->vocab = (char **)calloc(n, sizeof(char *));
-            tk->vlen  = (int *)calloc(n, sizeof(int));
+            tk->vocab = (char **)calloc((size_t)n, sizeof(char *));
+            tk->vlen  = (int *)calloc((size_t)n, sizeof(int));
             for (uint64_t j = 0; j < n; j++)
                 tk->vocab[j] = rstr(&r, &tk->vlen[j]);
         }
@@ -1065,7 +1065,7 @@ static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
             if (vt != GV_ARR) { skip(&r, vt); free(key); continue; }
             ru32(&r);
             uint64_t n = ru64(&r);
-            tk->scores = (float *)malloc(n * sizeof(float));
+            tk->scores = (float *)malloc((size_t)n * sizeof(float));
             for (uint64_t j = 0; j < n; j++) tk->scores[j] = rf32(&r);
         }
         else if (!strcmp(key, "tokenizer.ggml.merges")) {
@@ -1073,7 +1073,7 @@ static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
             ru32(&r);
             uint64_t n = ru64(&r);
             *out_n_merges = (int)n;
-            *out_merges = (char **)malloc(n * sizeof(char *));
+            *out_merges = (char **)malloc((size_t)n * sizeof(char *));
             for (uint64_t j = 0; j < n; j++)
                 (*out_merges)[j] = rstr(&r, NULL);
         }
@@ -1089,7 +1089,7 @@ static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
     c->kv_mul = c->n_heads / c->n_kv_heads;
 
     m->nti = (int)n_tensors;
-    m->ti  = (TensorInfo *)calloc(n_tensors, sizeof(TensorInfo));
+    m->ti  = (TensorInfo *)calloc((size_t)n_tensors, sizeof(TensorInfo));
     for (uint64_t i = 0; i < n_tensors; i++) {
         m->ti[i].name   = rstr(&r, NULL);
         m->ti[i].n_dims = (int)ru32(&r);
@@ -1104,7 +1104,7 @@ static void parse_gguf(Model *m, char ***out_merges, int *out_n_merges) {
 
 static void init_tokenizer(Tok *tk, char **merges, int n_merges) {
     if (!tk->scores && tk->size > 0)
-        tk->scores = (float *)calloc(tk->size, sizeof(float));
+        tk->scores = (float *)calloc((size_t)tk->size, sizeof(float));
     tok_build_hash(tk);
     build_byte_tokens(tk);
 
@@ -1114,7 +1114,7 @@ static void init_tokenizer(Tok *tk, char **merges, int n_merges) {
             if (!sp) { free(merges[i]); continue; }
             int la = (int)(sp - merges[i]);
             int lb = (int)strlen(sp + 1);
-            char *buf = (char *)malloc(la + lb + 1);
+            char *buf = (char *)malloc((size_t)la + (size_t)lb + 1);
             memcpy(buf, merges[i], la);
             memcpy(buf + la, sp + 1, lb);
             buf[la + lb] = 0;
@@ -1225,17 +1225,24 @@ static void load_weights(Model *m) {
 
     w->embd = find_tensor(m, "token_embd.weight", &w->embd_t);
 
-    w->norm_att = (float **)calloc(L, sizeof(float *));
-    w->q_norm   = (float **)calloc(L, sizeof(float *));
-    w->k_norm   = (float **)calloc(L, sizeof(float *));
-    w->wq       = (void **)calloc(L, sizeof(void *));  w->wq_t   = (int *)calloc(L, sizeof(int));
-    w->wk       = (void **)calloc(L, sizeof(void *));  w->wk_t   = (int *)calloc(L, sizeof(int));
-    w->wv       = (void **)calloc(L, sizeof(void *));  w->wv_t   = (int *)calloc(L, sizeof(int));
-    w->wo       = (void **)calloc(L, sizeof(void *));  w->wo_t   = (int *)calloc(L, sizeof(int));
-    w->norm_ffn = (float **)calloc(L, sizeof(float *));
-    w->gate     = (void **)calloc(L, sizeof(void *));  w->gate_t  = (int *)calloc(L, sizeof(int));
-    w->up       = (void **)calloc(L, sizeof(void *));  w->up_t    = (int *)calloc(L, sizeof(int));
-    w->down     = (void **)calloc(L, sizeof(void *));  w->down_t  = (int *)calloc(L, sizeof(int));
+    w->norm_att = (float **)calloc((size_t)L, sizeof(float *));
+    w->q_norm   = (float **)calloc((size_t)L, sizeof(float *));
+    w->k_norm   = (float **)calloc((size_t)L, sizeof(float *));
+    w->wq       = (void **)calloc((size_t)L, sizeof(void *));
+    w->wq_t     = (int *)calloc((size_t)L, sizeof(int));
+    w->wk       = (void **)calloc((size_t)L, sizeof(void *));
+    w->wk_t     = (int *)calloc((size_t)L, sizeof(int));
+    w->wv       = (void **)calloc((size_t)L, sizeof(void *));
+    w->wv_t     = (int *)calloc((size_t)L, sizeof(int));
+    w->wo       = (void **)calloc((size_t)L, sizeof(void *));
+    w->wo_t     = (int *)calloc((size_t)L, sizeof(int));
+    w->norm_ffn = (float **)calloc((size_t)L, sizeof(float *));
+    w->gate     = (void **)calloc((size_t)L, sizeof(void *));
+    w->gate_t   = (int *)calloc((size_t)L, sizeof(int));
+    w->up       = (void **)calloc((size_t)L, sizeof(void *));
+    w->up_t     = (int *)calloc((size_t)L, sizeof(int));
+    w->down     = (void **)calloc((size_t)L, sizeof(void *));
+    w->down_t   = (int *)calloc((size_t)L, sizeof(int));
 
     char name[128];
     for (int l = 0; l < L; l++) {
@@ -1285,18 +1292,18 @@ static void load_weights(Model *m) {
 
 static void alloc_state(State *s, Config *c) {
     int kv_cache_len = c->n_layers * c->max_seq * c->kv_dim;
-    s->x      = (float *)calloc(c->dim, sizeof(float));
-    s->xb     = (float *)calloc(c->dim, sizeof(float));
-    s->xb2    = (float *)calloc(c->dim, sizeof(float));
-    s->hb     = (float *)calloc(c->hidden_dim, sizeof(float));
-    s->hb2    = (float *)calloc(c->hidden_dim, sizeof(float));
-    s->q      = (float *)calloc(c->dim, sizeof(float));
-    s->k      = (float *)calloc(c->kv_dim, sizeof(float));
-    s->v      = (float *)calloc(c->kv_dim, sizeof(float));
-    s->att    = (float *)calloc(c->n_heads * c->max_seq, sizeof(float));
-    s->logits = (float *)calloc(c->vocab_size, sizeof(float));
-    s->kc     = (float *)calloc(kv_cache_len, sizeof(float));
-    s->vc     = (float *)calloc(kv_cache_len, sizeof(float));
+    s->x      = (float *)calloc((size_t)c->dim, sizeof(float));
+    s->xb     = (float *)calloc((size_t)c->dim, sizeof(float));
+    s->xb2    = (float *)calloc((size_t)c->dim, sizeof(float));
+    s->hb     = (float *)calloc((size_t)c->hidden_dim, sizeof(float));
+    s->hb2    = (float *)calloc((size_t)c->hidden_dim, sizeof(float));
+    s->q      = (float *)calloc((size_t)c->dim, sizeof(float));
+    s->k      = (float *)calloc((size_t)c->kv_dim, sizeof(float));
+    s->v      = (float *)calloc((size_t)c->kv_dim, sizeof(float));
+    s->att    = (float *)calloc((size_t)c->n_heads * (size_t)c->max_seq, sizeof(float));
+    s->logits = (float *)calloc((size_t)c->vocab_size, sizeof(float));
+    s->kc     = (float *)calloc((size_t)kv_cache_len, sizeof(float));
+    s->vc     = (float *)calloc((size_t)kv_cache_len, sizeof(float));
 }
 
 static void free_state(State *s) {
@@ -1736,14 +1743,66 @@ static void print_tok(Tok *tk, int id) {
     fflush(stdout);
 }
 
+#define PREFILL_BAR_WIDTH 40
+
+static void prefill_progress_update(int done, int total) {
+    if (total <= 0) return;
+    if (done > total) done = total;
+    int filled = (done * PREFILL_BAR_WIDTH) / total;
+    int pct = (done * 100) / total;
+    fprintf(stderr, "\rPrefill [");
+    for (int i = 0; i < PREFILL_BAR_WIDTH; i++)
+        fputc(i < filled ? '=' : ' ', stderr);
+    fprintf(stderr, "] %3d%% (%d/%d)", pct, done, total);
+    fflush(stderr);
+}
+
+static void prefill_progress_done(int n_tokens, double elapsed_sec) {
+    double tps = (elapsed_sec > 0.0) ? (double)n_tokens / elapsed_sec : 0.0;
+    fprintf(stderr, "\rPrefill [");
+    for (int i = 0; i < PREFILL_BAR_WIDTH; i++)
+        fputc('=', stderr);
+    fprintf(stderr, "] 100%% (%d/%d)\n", n_tokens, n_tokens);
+    fprintf(stderr, "Prefill complete: %d tokens in %.2fs (%.2f tok/s)\n",
+            n_tokens, elapsed_sec, tps);
+}
+
+static void decode_progress_done(int n_tokens, double elapsed_sec) {
+    double tps = (elapsed_sec > 0.0) ? (double)n_tokens / elapsed_sec : 0.0;
+    fflush(stdout);
+    fputc('\n', stdout);
+    fflush(stdout);
+    fprintf(stderr, "\nDecode complete: %d tokens in %.2fs (%.2f tok/s)\n",
+            n_tokens, elapsed_sec, tps);
+}
+
+static void throughput_summary(int n_prefill, double prefill_sec,
+                             int n_decode, double decode_sec,
+                             double total_sec) {
+    double prefill_tps = (prefill_sec > 0.0) ? (double)n_prefill / prefill_sec : 0.0;
+    double decode_tps  = (decode_sec > 0.0)  ? (double)n_decode / decode_sec  : 0.0;
+    int n_total = n_prefill + n_decode;
+    double total_tps = (total_sec > 0.0) ? (double)n_total / total_sec : 0.0;
+    fprintf(stderr, "--- throughput ---\n");
+    fprintf(stderr, "  prefill: %.2f tok/s\n", prefill_tps);
+    fprintf(stderr, "  decode:  %.2f tok/s\n", decode_tps);
+    fprintf(stderr, "  total:   %.2f tok/s\n", total_tps);
+}
+
 static void generate(Model *m, int *prompt, int n_prompt,
                      int max_new, float temp, float topp, uint64_t seed) {
     uint64_t rng = seed ? seed : 1;
     int token = prompt[0];
     int gen = 0;
+    int prefill_reported = 0;
+    int decode_timing = 0;
+    double prefill_sec = 0.0;
 
-    struct timespec t0, t1;
+    struct timespec t0, t1, t_prefill, t_decode;
     clock_gettime(CLOCK_MONOTONIC, &t0);
+    clock_gettime(CLOCK_MONOTONIC, &t_prefill);
+    if (n_prompt > 0)
+        prefill_progress_update(0, n_prompt);
 
     for (int pos = 0; pos < n_prompt + max_new - 1; pos++) {
         if (pos >= m->cfg.max_seq) {
@@ -1753,10 +1812,28 @@ static void generate(Model *m, int *prompt, int n_prompt,
 
         forward(m, token, pos);
 
+        if (n_prompt > 0 && pos < n_prompt) {
+            prefill_progress_update(pos + 1, n_prompt);
+            if (pos == n_prompt - 1 && !prefill_reported) {
+                struct timespec t_now;
+                clock_gettime(CLOCK_MONOTONIC, &t_now);
+                prefill_sec = (t_now.tv_sec - t_prefill.tv_sec)
+                    + (t_now.tv_nsec - t_prefill.tv_nsec) / 1e9;
+                prefill_progress_done(n_prompt, prefill_sec);
+                prefill_reported = 1;
+                clock_gettime(CLOCK_MONOTONIC, &t_decode);
+                decode_timing = 1;
+            }
+        }
+
         int next;
         if (pos < n_prompt - 1) {
             next = prompt[pos + 1];
         } else {
+            if (!decode_timing) {
+                clock_gettime(CLOCK_MONOTONIC, &t_decode);
+                decode_timing = 1;
+            }
             next = sample_token(m->s.logits, m->cfg.vocab_size, temp, topp, &rng);
             if (next == m->tok.eos || next == m->tok.eot) break;
             gen++;
@@ -1767,10 +1844,17 @@ static void generate(Model *m, int *prompt, int n_prompt,
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+    double decode_sec = 0.0;
+    if (decode_timing) {
+        decode_sec = (t1.tv_sec - t_decode.tv_sec)
+            + (t1.tv_nsec - t_decode.tv_nsec) / 1e9;
+        decode_progress_done(gen, decode_sec);
+    }
 
     printf("\n\n--- %d prompt tokens + %d generated tokens ---\n", n_prompt, gen);
-    printf("--- %.1fs total (%.2f tok/s) ---\n", elapsed,
-           (gen > 0) ? gen / elapsed : 0.0);
+    printf("--- %.1fs total ---\n", elapsed);
+    if (prefill_reported || decode_timing)
+        throughput_summary(n_prompt, prefill_sec, gen, decode_sec, elapsed);
 }
 
 int main(int argc, char *argv[]) {
