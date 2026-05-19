@@ -38,22 +38,22 @@
 
 | 項目 | 値 |
 |------|-----|
-| CPU | AMD Ryzen AI 5 340（12 論理コア） |
+| CPU | AMD Ryzen 9 5950X（32 論理コア） |
 | OS | Linux |
 | モデル | `Bonsai-8B-Q1_0.gguf` (pre-read, in RAM) |
 | コマンド | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0`（`-n` は decode 上限、`-t` は温度） |
 | ワークロード | prefill **18** トークン（`-p "Hello"` + chat テンプレート）+ decode **16** トークン（`-n 16`） |
 | 表の指標 | decode 時間・tok/s のみ（stderr の `Decode complete` 行。prefill は含めない） |
-| 環境変数 | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`、`cpu-blas` のみ `OPENBLAS_NUM_THREADS=1` |
+| 環境変数 | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=32`、`cpu-blas` のみ `OPENBLAS_NUM_THREADS=1` |
 | 再現 | 各バイナリで 1 回ウォームアップ後、3 回計測の**最高** decode tok/s (GGUF pre-read in RAM) |
 
 | バイナリ | decode 時間 | decode スループット | 備考 |
 |----------|----------:|-----------------:|------|
-| `bonsai-cpu` | 60.0 s | 0.27 tok/s | 単スレッド、`-O3`（`cpu/Makefile` 既定） |
-| `bonsai-cpu-omp` | 9.7 s | 1.65 tok/s | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
-| `bonsai-cpu-blas` | 1.1 s | 14.27 tok/s | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
+| `bonsai-cpu` | 66.8 s | 0.24 tok/s | 単スレッド、`-O3`（`cpu/Makefile` 既定） |
+| `bonsai-cpu-omp` | 3.2 s | 4.94 tok/s | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
+| `bonsai-cpu-blas` | 0.5 s | 30.79 tok/s | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
 
-この条件下では **`cpu-blas` が `cpu-omp` の約 9 倍**、**`cpu` の約 53 倍**の decode スループット（`cpu-omp` は `cpu` の約 6 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致。`cpu-blas` の Q1_0 は **Q8_0 活性化 + AVX2 内積**（llama.cpp 準拠）。
+この条件下では **`cpu-blas` が `cpu-omp` の約 6 倍**、**`cpu` の約 128 倍**の decode スループット（`cpu-omp` は `cpu` の約 21 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致。`cpu-blas` の Q1_0 は **Q8_0 活性化 + AVX2 内積**（llama.cpp 準拠）。
 
 ## ディレクトリとファイル構成
 

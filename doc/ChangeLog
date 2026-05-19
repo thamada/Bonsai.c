@@ -4,6 +4,12 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-19 17:22:35
+
+**ドキュメント**: **`README.md`** / **`README.en.md`** / **`doc/design.md`** — 参考ベンチマークを再計測して更新（AMD Ryzen 9 5950X・32 論理コア・Linux・`Bonsai-8B-Q1_0.gguf`・`-p "Hello" -n 16 -t 0`・`OMP_NUM_THREADS=32`・`OPENBLAS_NUM_THREADS=1`（`cpu-blas` のみ）・GGUF pre-read in RAM・各バイナリ 1 回ウォームアップ後 3 回の最高 decode tok/s）。**`bonsai-cpu`** decode 66.8 s（**0.24 tok/s**）、**`bonsai-cpu-omp`** 3.2 s（**4.94 tok/s**）、**`bonsai-cpu-blas`** 0.5 s（**30.79 tok/s**、`cpu-omp` の約 6 倍・`cpu` の約 128 倍）。3 バイナリの生成テキスト一致を記載。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-19 16:42:51
 
 **ドキュメント**: **`README.md`** / **`README.en.md`** / **`doc/design.md`** — 参考ベンチマーク表の説明を整理。旧「計測」1 行（プロンプト 18 + 生成 16 と decode 専用 tok/s の併記）を **コマンド**（`-n` は decode 上限・`-t` は温度）、**ワークロード**（prefill 18 + decode 16）、**表の指標**（decode 時間・tok/s のみ、prefill 除外）の 3 行に分割し、読み手がトークン数と表の指標を混同しないようにした。

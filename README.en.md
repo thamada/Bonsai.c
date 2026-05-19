@@ -232,22 +232,22 @@ make run.cpu-blas PROMPT="Hello"
 | Item | Value |
 |---|---|
 | Date | 2026-05-19 |
-| CPU | AMD Ryzen AI 5 340 (12 logical cores) |
+| CPU | AMD Ryzen 9 5950X (32 logical cores) |
 | OS | Linux |
 | Model | `Bonsai-8B-Q1_0.gguf` (pre-read, in RAM) |
 | Command | `./<binary> Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` (`-n` = decode cap, `-t` = temperature) |
 | Workload | prefill **18** tokens (`-p "Hello"` + chat template) + decode **16** tokens (`-n 16`) |
 | Table metric | decode time and tok/s only (`Decode complete` on stderr; prefill excluded) |
-| Environment | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=12`; `cpu-blas` also `OPENBLAS_NUM_THREADS=1` |
+| Environment | `cpu-omp` / `cpu-blas`: `OMP_NUM_THREADS=32`; `cpu-blas` also `OPENBLAS_NUM_THREADS=1` |
 | Method | One warmup run per binary, then **best of 3** decode tok/s (GGUF pre-read in RAM) |
 
 | Binary | Decode time | Decode throughput | Notes |
 |---|---:|---:|---|
-| `cpu/bonsai-cpu` | 60.0 s | **0.27 tok/s** | Single-threaded, `-O3` (`cpu/Makefile` defaults) |
-| `cpu-omp/bonsai-cpu-omp` | 9.7 s | **1.65 tok/s** | `-O3 -fopenmp` (`cpu-omp/Makefile` defaults) |
-| `cpu-blas/bonsai-cpu-blas` | 1.1 s | **14.27 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`, OpenBLAS at 1 thread |
+| `cpu/bonsai-cpu` | 66.8 s | **0.24 tok/s** | Single-threaded, `-O3` (`cpu/Makefile` defaults) |
+| `cpu-omp/bonsai-cpu-omp` | 3.2 s | **4.94 tok/s** | `-O3 -fopenmp` (`cpu-omp/Makefile` defaults) |
+| `cpu-blas/bonsai-cpu-blas` | 0.5 s | **30.79 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`, OpenBLAS at 1 thread |
 
-Under these conditions, **`cpu-blas` was about 9× faster than `cpu-omp`** and **about 53× faster than `cpu`** (`cpu-omp` was about 6× faster than `cpu`). Generated text (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`) matched on all three binaries. `-ffast-math` allows different FP reduction order than `cpu-omp`; output still matched in this run.
+Under these conditions, **`cpu-blas` was about 6× faster than `cpu-omp`** and **about 128× faster than `cpu`** (`cpu-omp` was about 21× faster than `cpu`). Generated text (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`) matched on all three binaries. `-ffast-math` allows different FP reduction order than `cpu-omp`; output still matched in this run.
 
 ## Common CLI options
 
