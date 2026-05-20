@@ -392,8 +392,8 @@ bonsai-8b/gpu-cuda/
 |---|---|---|
 | 重み | `token_embd`, 各層 `wq/wk/wv/wo/gate/up/down`, `output` | Q1_0（g128） |
 | 重み | `attn_norm`, `q_norm`, `k_norm`, `ffn_norm`, `output_norm` | F32 |
-| KV キャッシュ | `kc_pack`, `vc_pack`（既定） | **TurboQuant**（PolarQuant 2-bit + QJL 1-bit / 座標、head_dim=128） |
-| KV キャッシュ（`--no-tq`） | `kc`, `vc` | F32、`n_layers × max_seq × kv_dim` |
+| KV キャッシュ（既定） | `kc`, `vc` | F32、`n_layers × max_seq × kv_dim` |
+| KV キャッシュ（`--turboquant`） | `kc_pack`, `vc_pack` | **TurboQuant**（PolarQuant 2-bit + QJL 1-bit / 座標、head_dim=128） |
 | Decode 用活性化 | `x`, `xb`, `xb2`, `q`, `k`, `v`, `hb`, `hb2`, `logits`, `q8` | F32 / Q8_0 |
 | Prefill 用バッチ | `x_batch`, `xb_batch`, … `q8_batch` 等 | `-l`（`max_seq`）トークン分を事前確保 |
 
@@ -418,8 +418,8 @@ Prefill 中のプログレスバーは **0% → バッチ完了で 100%** です
 3. **Q/K/V 投影** — `gpu_mm`（Q1_0 GEMV、後述）で `q`, `k`, `v` を計算。
 4. **Q/K head norm** — `rmsnorm_head_kernel`。
 5. **RoPE** — `rope_neox_kernel`（NeoX 半分ペア）。cos/sin テーブルは **CPU で YaRN メタを解釈して生成**し、`rope_cache` へ H2D。
-6. **KV 書き込み** — 既定では **TurboQuant** で `k`, `v` を圧縮して `kc_pack` / `vc_pack` へ格納（レイアウト: `[layer][kv_head][seq_pos]`、48 B/head）。`--no-tq` 時は F32 へ D2D コピー。
-7. **Attention** — `flash_attn_gqa_kernel`（後述）。TurboQuant 時は圧縮 K から QJL 付き内積推定、V は PolarQuant 復元。出力は `xb`。
+6. **KV 書き込み** — 既定は F32 へ D2D コピー。`--turboquant` 時は **TurboQuant** で `k`, `v` を圧縮して `kc_pack` / `vc_pack` へ格納（レイアウト: `[layer][kv_head][seq_pos]`、48 B/head）。
+7. **Attention** — `flash_attn_gqa_kernel`（後述）。`--turboquant` 時は圧縮 K から QJL 付き内積推定、V は PolarQuant 復元。出力は `xb`。
 8. **出力投影 + 残差** — `gpu_mm`（`wo`）→ `add_kernel`。
 9. **FFN 前 norm** → **gate/up 投影** → **SwiGLU** → **down 投影** → **残差**。
 10. **最終 norm + LM head** — `rmsnorm_kernel` → `gpu_mm`（`output`）→ `logits`。
@@ -478,7 +478,7 @@ CPU 側（`build_rope_cache_host`）で llama.cpp 準拠の **NeoX 半分ペア*
 - 対象 GGUF: **`Bonsai-8B-Q1_0`**（Q1_0 g128 + F32 norm）。他量子化形式は未対応。
 - `head_dim > 128`（`FA_HD`）のモデルでは Flash Attention カーネルが no-op になります（Bonsai-8B では `head_dim = 128`）。
 - Prefill と Decode で KV キャッシュは共有 — Prefill 後の Decode は `pos = n_prompt` から続き、Prefill で填充済みの `kc_pack`/`vc_pack`（または F32 `kc`/`vc`）をそのまま参照します。
-- **TurboQuant**（Google Research, [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)）: ランダム直交回転後の Lloyd-Max スカラー量子化（PolarQuant）+ 残差 1-bit QJL。学習不要・推論時オンライン適用。CLI: `--no-tq` で無効化。
+- **TurboQuant**（Google Research, [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)）: ランダム直交回転後の Lloyd-Max スカラー量子化（PolarQuant）+ 残差 1-bit QJL。学習不要・推論時オンライン適用。CLI: `--turboquant` で有効化（未指定時は F32 KV）。Attention では `q_rot`/`sq` をヘッドあたり 1 回だけ計算し、キーごとは軽量 score + タイル単位 V 復元（128 スレッド協調 matvec）。
 
 ### 必要なもの
 

@@ -1328,7 +1328,7 @@ static GpuConfig gpu_config_from(const Config *c) {
     g.yarn_attn_factor = c->yarn_attn_factor;
     g.yarn_beta_fast = c->yarn_beta_fast;
     g.yarn_beta_slow = c->yarn_beta_slow;
-    g.turboquant_kv = 1;
+    g.turboquant_kv = 0;
     return g;
 }
 
@@ -1582,7 +1582,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  -k <topp>     Top-p sampling (default: 0.9)\n");
         fprintf(stderr, "  -s <seed>     Random seed (default: time)\n");
         fprintf(stderr, "  -l <len>      Max sequence length (default: 512)\n");
-        fprintf(stderr, "  --no-tq       Disable TurboQuant KV cache (use F32 KV)\n");
+        fprintf(stderr, "  --turboquant  Enable TurboQuant KV cache (PolarQuant+QJL)\n");
         return 1;
     }
 
@@ -1593,11 +1593,11 @@ int main(int argc, char *argv[]) {
     float topp       = 0.9f;
     uint64_t seed    = (uint64_t)time(NULL);
     int   max_seq    = 512;
-    int   turboquant_kv = 1;
+    int   turboquant_kv = 0;
 
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--no-tq")) {
-            turboquant_kv = 0;
+        if (!strcmp(argv[i], "--turboquant")) {
+            turboquant_kv = 1;
             continue;
         }
         if (i + 1 >= argc) break;

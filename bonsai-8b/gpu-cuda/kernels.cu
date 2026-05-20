@@ -2,6 +2,7 @@
  * Bonsai GPU forward — CUDA kernels。
  * Q1_0 GEMV: 活性化 Q8_0 化 + vec_dot_q1_0_q8_0（cpu-blas 準拠）。
  * Attention: Flash Attention + K/V shared-memory タイル staging（online softmax）。
+ * TurboQuant: q_rot/sq をヘッドあたり 1 回、キーごとは軽量 score + タイル V 復元。
  */
 
 #include "gpu.h"
@@ -47,102 +48,31 @@ static __device__ int dev_tq_unpack_idx(const uint8_t *packed, int i, int bits)
     return (packed[bitpos >> 3] >> (bitpos & 7)) & ((1 << bits) - 1);
 }
 
-static __device__ float dev_tq_dot_q_yhat(const float *q_rot, const DevTurboQuant *tq,
-    const uint8_t *indices)
+#define TQ_QJL_SCALE  (0.886226925452758f / (float)TQ_HD) /* sqrt(pi/2)/d */
+
+/* threadIdx.x が行 i を担当（blockDim.x >= dim） */
+static __device__ void dev_tq_matvec_pi_par(const DevTurboQuant *tq,
+    const float *x, float *y)
 {
+    const int d = tq->dim;
+    const int i = (int)threadIdx.x;
+    if (i >= d) return;
     float s = 0.0f;
-    for (int i = 0; i < tq->dim; i++) {
-        int idx = dev_tq_unpack_idx(indices, i, tq->polar_bits);
-        s += q_rot[i] * tq->centroids[idx];
-    }
-    return s;
+    for (int j = 0; j < d; j++)
+        s += tq->pi[i * d + j] * x[j];
+    y[i] = s;
 }
 
-static __device__ void dev_tq_matvec_pi(const DevTurboQuant *tq, const float *x, float *y)
+static __device__ void dev_tq_matvec_s_par(const DevTurboQuant *tq,
+    const float *x, float *y)
 {
     const int d = tq->dim;
-    for (int i = 0; i < d; i++) {
-        float s = 0.0f;
-        for (int j = 0; j < d; j++)
-            s += tq->pi[i * d + j] * x[j];
-        y[i] = s;
-    }
-}
-
-static __device__ void dev_tq_matvec_pi_t(const DevTurboQuant *tq, const float *y, float *x)
-{
-    const int d = tq->dim;
-    for (int i = 0; i < d; i++) {
-        float s = 0.0f;
-        for (int j = 0; j < d; j++)
-            s += tq->pi[j * d + i] * y[j];
-        x[i] = s;
-    }
-}
-
-static __device__ float dev_tq_inner_product(const DevTurboQuant *tq, const float *query,
-    const uint8_t *indices, const uint8_t *qjl)
-{
-    float q_rot[TQ_HD];
-    float sq[TQ_HD];
-    dev_tq_matvec_pi(tq, query, q_rot);
-    float base = dev_tq_dot_q_yhat(q_rot, tq, indices);
-    for (int i = 0; i < tq->dim; i++) {
-        float acc = 0.0f;
-        for (int j = 0; j < tq->dim; j++)
-            acc += tq->s[i * tq->dim + j] * q_rot[j];
-        sq[i] = acc;
-    }
-    float corr = 0.0f;
-    const float scale = 0.886226925452758f / (float)tq->dim; /* sqrt(pi/2)/d */
-    for (int i = 0; i < tq->dim; i++) {
-        int sign = (qjl[i >> 3] >> (i & 7)) & 1;
-        float spm1 = sign ? 1.0f : -1.0f;
-        corr += fabsf(sq[i]) * spm1;
-    }
-    return base + scale * corr;
-}
-
-static __device__ void dev_tq_dequant_v(const DevTurboQuant *tq, const uint8_t *indices,
-    float *out)
-{
-    float y_hat[TQ_HD];
-    for (int i = 0; i < tq->dim; i++) {
-        int idx = dev_tq_unpack_idx(indices, i, tq->polar_bits);
-        y_hat[i] = tq->centroids[idx];
-    }
-    dev_tq_matvec_pi_t(tq, y_hat, out);
-}
-
-static __device__ void dev_tq_compress(const DevTurboQuant *tq, const float *x,
-    uint8_t *out_indices, uint8_t *out_qjl)
-{
-    float y_rot[TQ_HD];
-    dev_tq_matvec_pi(tq, x, y_rot);
-    for (int b = 0; b < TQ_IND_BYTES_N; b++)
-        out_indices[b] = 0;
-    for (int b = 0; b < TQ_QJL_PACK_N; b++)
-        out_qjl[b] = 0;
-    for (int i = 0; i < tq->dim; i++) {
-        float v = y_rot[i];
-        int idx = 0;
-        while (idx < tq->n_levels - 1 && v >= tq->boundaries[idx + 1])
-            idx++;
-        int bitpos = i * tq->polar_bits;
-        out_indices[bitpos >> 3] |= (uint8_t)((idx & ((1 << tq->polar_bits) - 1)) << (bitpos & 7));
-    }
-    float res[TQ_HD];
-    for (int i = 0; i < tq->dim; i++) {
-        int idx = dev_tq_unpack_idx(out_indices, i, tq->polar_bits);
-        res[i] = y_rot[i] - tq->centroids[idx];
-    }
-    for (int i = 0; i < tq->dim; i++) {
-        float acc = 0.0f;
-        for (int j = 0; j < tq->dim; j++)
-            acc += tq->s[i * tq->dim + j] * res[j];
-        if (acc >= 0.0f)
-            out_qjl[i >> 3] |= (uint8_t)(1u << (i & 7));
-    }
+    const int i = (int)threadIdx.x;
+    if (i >= d) return;
+    float s = 0.0f;
+    for (int j = 0; j < d; j++)
+        s += tq->s[i * d + j] * x[j];
+    y[i] = s;
 }
 
 static __device__ size_t dev_tq_layer_offset(int layer, int max_seq, int n_kv,
@@ -158,6 +88,89 @@ static __device__ size_t dev_tq_kv_offset(int layer, int kvh, int pos, int max_s
         + ((size_t)kvh * (size_t)max_seq + (size_t)pos) * entry_bytes;
 }
 
+static __device__ float dev_tq_score_key(const DevTurboQuant *tq,
+    const float *q_rot, const float *sq,
+    const uint8_t *indices, const uint8_t *qjl)
+{
+    float base = 0.0f;
+    const int d = tq->dim;
+    const int bits = tq->polar_bits;
+    for (int i = 0; i < d; i++) {
+        int idx = dev_tq_unpack_idx(indices, i, bits);
+        base += q_rot[i] * tq->centroids[idx];
+    }
+    float corr = 0.0f;
+    for (int i = 0; i < d; i++) {
+        int sign = (qjl[i >> 3] >> (i & 7)) & 1;
+        corr += fabsf(sq[i]) * (sign ? 1.0f : -1.0f);
+    }
+    return base + TQ_QJL_SCALE * corr;
+}
+
+/* V タイル: y_hat_buf（k_tile を流用可）→ v_tile。Pi^T は列ごとに並列 */
+static __device__ void dev_tq_load_v_tile(const DevTurboQuant *tq,
+    const uint8_t *vc_pack, int layer, int kvh, int t0, int tc,
+    int max_seq, int n_kv, size_t tq_entry,
+    float y_hat_buf[FA_BR][FA_HD], float v_tile[FA_BR][FA_HD])
+{
+    const int d = tq->dim;
+    for (int idx = (int)threadIdx.x; idx < tc * d; idx += (int)blockDim.x) {
+        const int j = idx / d;
+        const int i = idx - j * d;
+        const uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, t0 + j, max_seq, n_kv, tq_entry);
+        const int qidx = dev_tq_unpack_idx(vp, i, tq->polar_bits);
+        y_hat_buf[j][i] = tq->centroids[qidx];
+    }
+    __syncthreads();
+    for (int col = (int)threadIdx.x; col < d; col += (int)blockDim.x) {
+        for (int j = 0; j < tc; j++) {
+            float s = 0.0f;
+            for (int k = 0; k < d; k++)
+                s += tq->pi[k * d + col] * y_hat_buf[j][k];
+            v_tile[j][col] = s;
+        }
+    }
+}
+
+static __device__ void dev_tq_compress_par(const DevTurboQuant *tq,
+    const float *x_sh, float *y_rot_sh, float *res_sh,
+    uint8_t *out_indices, uint8_t *out_qjl)
+{
+    const int d = tq->dim;
+    const int bits = tq->polar_bits;
+
+    dev_tq_matvec_pi_par(tq, x_sh, y_rot_sh);
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        for (int b = 0; b < TQ_IND_BYTES_N; b++) out_indices[b] = 0;
+        for (int b = 0; b < TQ_QJL_PACK_N; b++) out_qjl[b] = 0;
+        for (int i = 0; i < d; i++) {
+            float v = y_rot_sh[i];
+            int idx = 0;
+            while (idx < tq->n_levels - 1 && v >= tq->boundaries[idx + 1])
+                idx++;
+            const int bitpos = i * bits;
+            out_indices[bitpos >> 3] |= (uint8_t)((idx & ((1 << bits) - 1)) << (bitpos & 7));
+        }
+        for (int i = 0; i < d; i++) {
+            const int idx = dev_tq_unpack_idx(out_indices, i, bits);
+            res_sh[i] = y_rot_sh[i] - tq->centroids[idx];
+        }
+    }
+    __syncthreads();
+
+    dev_tq_matvec_s_par(tq, res_sh, y_rot_sh);
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        for (int i = 0; i < d; i++) {
+            if (y_rot_sh[i] >= 0.0f)
+                out_qjl[i >> 3] |= (uint8_t)(1u << (i & 7));
+        }
+    }
+}
+
 static __global__ void kv_tq_compress_kernel(uint8_t *kc_pack, uint8_t *vc_pack,
     const float *k, const float *v, int pos, int layer, int hd, int n_kv, int max_seq,
     DevTurboQuant tq)
@@ -165,12 +178,23 @@ static __global__ void kv_tq_compress_kernel(uint8_t *kc_pack, uint8_t *vc_pack,
     const int kvh = (int)blockIdx.x;
     if (kvh >= n_kv) return;
     const size_t entry = (size_t)GPU_TQ_ENTRY_BYTES;
+    __shared__ float x_sh[FA_HD];
+    __shared__ float y_rot_sh[FA_HD];
+    __shared__ float res_sh[FA_HD];
+
     const float *ks = k + (size_t)kvh * hd;
     const float *vs = v + (size_t)kvh * hd;
     uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, entry);
     uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, entry);
-    dev_tq_compress(&tq, ks, kp, kp + TQ_IND_BYTES_N);
-    dev_tq_compress(&tq, vs, vp, vp + TQ_IND_BYTES_N);
+
+    if (threadIdx.x < hd) x_sh[threadIdx.x] = ks[threadIdx.x];
+    __syncthreads();
+    dev_tq_compress_par(&tq, x_sh, y_rot_sh, res_sh, kp, kp + TQ_IND_BYTES_N);
+    __syncthreads();
+
+    if (threadIdx.x < hd) x_sh[threadIdx.x] = vs[threadIdx.x];
+    __syncthreads();
+    dev_tq_compress_par(&tq, x_sh, y_rot_sh, res_sh, vp, vp + TQ_IND_BYTES_N);
 }
 
 static __global__ void kv_tq_compress_batch_kernel(uint8_t *kc_pack, uint8_t *vc_pack,
@@ -182,12 +206,23 @@ static __global__ void kv_tq_compress_batch_kernel(uint8_t *kc_pack, uint8_t *vc
     const int kvh = tid % n_kv;
     if (t >= n_tokens || kvh >= n_kv) return;
     const size_t entry = (size_t)GPU_TQ_ENTRY_BYTES;
+    __shared__ float x_sh[FA_HD];
+    __shared__ float y_rot_sh[FA_HD];
+    __shared__ float res_sh[FA_HD];
+
     const float *ks = k_batch + (size_t)t * kv_dim + (size_t)kvh * hd;
     const float *vs = v_batch + (size_t)t * kv_dim + (size_t)kvh * hd;
     uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, t, max_seq, n_kv, entry);
     uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, t, max_seq, n_kv, entry);
-    dev_tq_compress(&tq, ks, kp, kp + TQ_IND_BYTES_N);
-    dev_tq_compress(&tq, vs, vp, vp + TQ_IND_BYTES_N);
+
+    if (threadIdx.x < hd) x_sh[threadIdx.x] = ks[threadIdx.x];
+    __syncthreads();
+    dev_tq_compress_par(&tq, x_sh, y_rot_sh, res_sh, kp, kp + TQ_IND_BYTES_N);
+    __syncthreads();
+
+    if (threadIdx.x < hd) x_sh[threadIdx.x] = vs[threadIdx.x];
+    __syncthreads();
+    dev_tq_compress_par(&tq, x_sh, y_rot_sh, res_sh, vp, vp + TQ_IND_BYTES_N);
 }
 
 static __device__ float fa_sh_reduce_max(float val, float *red_sh)
@@ -236,6 +271,8 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
     __shared__ float k_tile[FA_BR][FA_HD];
     __shared__ float v_tile[FA_BR][FA_HD];
     __shared__ float q_sh[FA_HD];
+    __shared__ float q_rot_sh[FA_HD];
+    __shared__ float sq_sh[FA_HD];
     __shared__ float o_sh[FA_HD];
     __shared__ float scores[FA_BR];
     __shared__ float red_sh[FA_HD];
@@ -245,6 +282,13 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
         o_sh[threadIdx.x] = 0.0f;
     }
     __syncthreads();
+
+    if (use_tq && tq && kc_pack && vc_pack) {
+        dev_tq_matvec_pi_par(tq, q_sh, q_rot_sh);
+        __syncthreads();
+        dev_tq_matvec_s_par(tq, q_rot_sh, sq_sh);
+        __syncthreads();
+    }
 
     float m = -1e30f;
     float l = 0.0f;
@@ -257,14 +301,11 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
             if (threadIdx.x < tc) {
                 const int pos = t0 + threadIdx.x;
                 const uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, tq_entry);
-                scores[threadIdx.x] = dev_tq_inner_product(tq, q_sh, kp, kp + TQ_IND_BYTES_N) * scale;
+                scores[threadIdx.x] = dev_tq_score_key(tq, q_rot_sh, sq_sh,
+                    kp, kp + TQ_IND_BYTES_N) * scale;
             }
-            for (int idx = threadIdx.x; idx < tc * hd; idx += blockDim.x) {
-                int j = idx / hd;
-                int pos = t0 + j;
-                const uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, tq_entry);
-                dev_tq_dequant_v(tq, vp, v_tile[j]);
-            }
+            dev_tq_load_v_tile(tq, vc_pack, layer, kvh, t0, tc, max_seq, n_kv, tq_entry,
+                k_tile, v_tile);
         } else {
             for (int idx = threadIdx.x; idx < tc * hd; idx += blockDim.x) {
                 int j = idx / hd;
@@ -342,6 +383,8 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
     __shared__ float k_tile[FA_BR][FA_HD];
     __shared__ float v_tile[FA_BR][FA_HD];
     __shared__ float q_sh[FA_HD];
+    __shared__ float q_rot_sh[FA_HD];
+    __shared__ float sq_sh[FA_HD];
     __shared__ float o_sh[FA_HD];
     __shared__ float scores[FA_BR];
     __shared__ float red_sh[FA_HD];
@@ -351,6 +394,13 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
         o_sh[threadIdx.x] = 0.0f;
     }
     __syncthreads();
+
+    if (use_tq && tq && kc_pack && vc_pack) {
+        dev_tq_matvec_pi_par(tq, q_sh, q_rot_sh);
+        __syncthreads();
+        dev_tq_matvec_s_par(tq, q_rot_sh, sq_sh);
+        __syncthreads();
+    }
 
     float m = -1e30f;
     float l = 0.0f;
@@ -363,14 +413,11 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
             if (threadIdx.x < tc) {
                 const int pos = t0 + threadIdx.x;
                 const uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, tq_entry);
-                scores[threadIdx.x] = dev_tq_inner_product(tq, q_sh, kp, kp + TQ_IND_BYTES_N) * scale;
+                scores[threadIdx.x] = dev_tq_score_key(tq, q_rot_sh, sq_sh,
+                    kp, kp + TQ_IND_BYTES_N) * scale;
             }
-            for (int idx = threadIdx.x; idx < tc * hd; idx += blockDim.x) {
-                int j = idx / hd;
-                int pos = t0 + j;
-                const uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, tq_entry);
-                dev_tq_dequant_v(tq, vp, v_tile[j]);
-            }
+            dev_tq_load_v_tile(tq, vc_pack, layer, kvh, t0, tc, max_seq, n_kv, tq_entry,
+                k_tile, v_tile);
         } else {
             for (int idx = threadIdx.x; idx < tc * hd; idx += blockDim.x) {
                 int j = idx / hd;
@@ -1191,7 +1238,7 @@ void gpu_forward(GpuModel *gm, int token, int pos)
 
         if (gm->use_tq) {
             DevTurboQuant tq = gm->tq_dev;
-            kv_tq_compress_kernel<<<n_kv, 1>>>(
+            kv_tq_compress_kernel<<<n_kv, FA_HD>>>(
                 gm->kc_pack, gm->vc_pack, gm->k, gm->v, pos, l, hd, n_kv, max_seq, tq);
             flash_attn_gqa_kernel<<<n_heads, FA_HD>>>(
                 gm->xb, gm->q, NULL, NULL,
@@ -1275,7 +1322,7 @@ void gpu_forward_prefill(GpuModel *gm, const int *tokens, int n_tokens)
 
         if (gm->use_tq) {
             DevTurboQuant tq = gm->tq_dev;
-            kv_tq_compress_batch_kernel<<<n_tokens * n_kv, 1>>>(
+            kv_tq_compress_batch_kernel<<<n_tokens * n_kv, FA_HD>>>(
                 gm->kc_pack, gm->vc_pack, gm->k_batch, gm->v_batch,
                 n_tokens, l, hd, kv_dim, n_kv, max_seq, tq);
             flash_attn_prefill_gqa_kernel<<<n_tokens * n_heads, FA_HD>>>(

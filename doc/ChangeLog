@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 02:41:23
+
+**`bonsai-8b/gpu-cuda/`**: **TurboQuant KV の既定を F32 に変更**（**`--turboquant`** で有効化。旧 **`--no-tq`** は削除）。**`kernels.cu`**: Attention で **`q_rot`/`sq` をヘッドあたり 1 回**、キーごとは **`dev_tq_score_key`**、V は **`dev_tq_load_v_tile`**（タイル協調 matvec）。KV 圧縮は **`kv_tq_compress_*`** を **`<<<…, FA_HD>>>`** で並列化（shared 上の **`dev_tq_compress_par`**）。
+
+**`README.md`**: 付録の VRAM 表・forward ステップ・制約を上記 CLI／TurboQuant 挙動に整合。
+
+**`doc/design.md`**: **`gpu-cuda`** の VRAM 表（F32 既定 / **`--turboquant`**）、forward 経路、Prefill KV カーネル、CLI **`--turboquant`**、**`turboquant.c`/`turboquant.h`**、制約・量子化節を更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 02:16:39
 
 **`README.md` / `README.en.md`**: GPU 参考ベンチマーク表の prefill を **~294 tok/s**（RTX 5090・バッチ prefill・`-p "Hello" -n 16 -t 0` 実測）に更新。旧 **~48 tok/s**（逐次 prefill 時代の参考値）と備考列を削除。

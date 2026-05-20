@@ -34,7 +34,7 @@ typedef struct {
     float norm_eps, rope_theta;
     float rope_freq_scale, yarn_ext_factor, yarn_attn_factor;
     float yarn_beta_fast, yarn_beta_slow;
-    int turboquant_kv; /* 1 = PolarQuant+QJL KV cache (default), 0 = F32 KV */
+    int turboquant_kv; /* 1 = PolarQuant+QJL KV cache (--turboquant), 0 = F32 KV (default) */
 } GpuConfig;
 
 typedef struct {
