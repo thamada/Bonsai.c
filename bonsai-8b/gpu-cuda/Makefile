@@ -96,6 +96,18 @@ blackwell:
 		exit 1; \
 	fi; \
 	echo "=== CUDA $$("$(CUDA13_NVCC)" --version | sed -n 's/.*release \([^,]*\).*/\1/p' | head -1) ready ==="; \
+	echo "=== Configuring CUDA PATH ==="; \
+	CUDA_PROFILE="/etc/profile.d/cuda.sh"; \
+	CUDA_BIN="/usr/local/cuda/bin"; \
+	if [ ! -f "$$CUDA_PROFILE" ] || ! grep -q 'cuda/bin' "$$CUDA_PROFILE" 2>/dev/null; then \
+		printf '%s\n' 'export PATH="/usr/local/cuda/bin$${PATH:+:$${PATH}}"' | $$SUDO tee "$$CUDA_PROFILE" > /dev/null; \
+		$$SUDO chmod 644 "$$CUDA_PROFILE"; \
+	fi; \
+	$$SUDO ln -sf "$$CUDA_BIN/nvcc" /usr/local/bin/nvcc; \
+	if ! command -v nvcc >/dev/null 2>&1; then \
+		export PATH="$$CUDA_BIN:$$PATH"; \
+	fi; \
+	echo "nvcc: $$(command -v nvcc)"; \
 	echo "=== Building for Blackwell ($(BLACKWELL_GENCODE), FA_BR=$(BLACKWELL_FA_BR)) ==="; \
 	$(MAKE) build CUDA_GENCODE="$(BLACKWELL_GENCODE)" NVCC="$(CUDA13_NVCC)" FA_BR="$(BLACKWELL_FA_BR)"
 
