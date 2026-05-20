@@ -52,6 +52,7 @@
 └── bonsai-8b/
     ├── Makefile
     ├── gguf.txt
+    ├── Bonsai-8B-Q1_0.gguf.sha256sum
     ├── cpu/
     │   ├── Makefile
     │   └── main.c
@@ -83,7 +84,8 @@
 - `libm`  
 - **`cpu-omp`** をビルドするときは **OpenMP に対応したコンパイラ**（GCC / Clang と通常同梱の OpenMP ランタイム、`libgomp` または `libomp`）  
 - **`cpu-blas`** をビルドするときは上記に加え **OpenBLAS**（例: Debian/Ubuntu では `libopenblas-dev`）  
-- **Bonsai-8B-Q1_0.gguf**（[prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)）
+- **`wget`**（`make model` で GGUF を取得するとき）  
+- **Bonsai-8B-Q1_0.gguf**（[prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)。`make model` で取得）
 
 ```bash
 sudo apt update
@@ -96,12 +98,20 @@ sudo apt install -y build-essential make
 
 `bonsai-8b/Makefile` の既定は **`MODEL=Bonsai-8B-Q1_0.gguf`** です。別パスを使うときは実行時に渡すか `make run.cpu MODEL=...` で指定してください。
 
-モデルはリポジトリに含めません。`bonsai-8b/gguf.txt` の URL からダウンロードし、`bonsai-8b/` 直下に置きます。
+GGUF 本体はリポジトリに含めません。`bonsai-8b/gguf.txt` の URL から **`make model`** でダウンロードし、`bonsai-8b/` 直下に置きます。ダウンロード後は **`Bonsai-8B-Q1_0.gguf.sha256sum`** で SHA256 を自動検証します（失敗時は破損ファイルを削除）。
+
+```bash
+cd bonsai-8b
+make model
+```
+
+手動で取得する場合:
 
 ```bash
 cd bonsai-8b
 url=$(sed 's|/blob/main/|/resolve/main/|' gguf.txt)
 wget -O Bonsai-8B-Q1_0.gguf "$url"
+sha256sum --check Bonsai-8B-Q1_0.gguf.sha256sum
 ```
 
 配置例:
@@ -115,12 +125,13 @@ bonsai-8b/
 └── Bonsai-8B-Q1_0.gguf
 ```
 
-整合性は [Hugging Face](https://huggingface.co/prism-ml/Bonsai-8B-gguf/tree/main) のハッシュと照合してください。
+整合性は **`make model`** が **`Bonsai-8B-Q1_0.gguf.sha256sum`** で検証します。[Hugging Face](https://huggingface.co/prism-ml/Bonsai-8B-gguf/tree/main) 上のハッシュとも一致するはずです。
 
 ## いちばん簡単な実行手順
 
 ```bash
 cd bonsai-8b
+make model
 make build.cpu
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
@@ -296,10 +307,11 @@ make clean
 
 ### `No such file or directory`
 
-モデルパスを確認してください。
+モデルパスを確認してください。未取得なら `bonsai-8b` で **`make model`** を実行してください。
 
 ```bash
 ls -lh bonsai-8b/Bonsai-8B-Q1_0.gguf
+cd bonsai-8b && make model
 ```
 
 ```bash
@@ -347,4 +359,4 @@ ls -lh bonsai-8b/Bonsai-8B-Q1_0.gguf
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-困ったときは、`bonsai-8b/Makefile`（`build.cpu` / `build.cpu-blas` / `run.cpu-blas` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。
+困ったときは、`bonsai-8b/Makefile`（`model` / `build.cpu` / `build.cpu-blas` / `run.cpu-blas` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。

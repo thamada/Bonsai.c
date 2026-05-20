@@ -59,7 +59,7 @@
 
 | パス | 役割 |
 |------|------|
-| `README.md` / `README.en.md` | ビルド・実行・方針（日／英）。 |
+| `README.md` / `README.en.md` | ビルド・実行・方針（日／英）。モデル取得は **`make model`** を主手順として記載。 |
 | `bonsai-8b/Makefile` | **`model`**（GGUF ダウンロード＋SHA256 検証）、**`build.cpu`** / **`run.cpu`**、**`build.cpu-blas`** / **`run.cpu-blas`**、**`clean`**（`cpu`・`cpu-blas` を委譲）。**`cpu-omp` は未集約**（サブディレクトリの Makefile を直接使用）。 |
 | `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-omp/Makefile` | **`bonsai-cpu-omp`** の生成（`-fopenmp`）。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
@@ -245,9 +245,10 @@ GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_enc
 ## モデル参照
 
 - 既定ファイル名: **`bonsai-8b/Makefile` の `MODEL`**（既定 **`Bonsai-8B-Q1_0.gguf`**）。
+- 前提: **`wget`**（`make model`）。利用者向けの詳細手順・クイックスタート・トラブルシュートは **`README.md` / `README.en.md`** を参照。
 - 取得 URL: **`bonsai-8b/gguf.txt`**（Hugging Face の `blob/main` URL。`make model` は `resolve/main` に置換して `wget` する）。
 - チェックサム: **`bonsai-8b/$(MODEL).sha256sum`**（既定 **`Bonsai-8B-Q1_0.gguf.sha256sum`**）。`make model` はダウンロード後に **`sha256sum --check`** で照合し、成功・失敗いずれも**英語**のメッセージを表示する。失敗時は破損ファイルを削除する。
-- 手動取得: README の手順どおり `gguf.txt` から URL を変換して `wget` し、同 `.sha256sum` で検証してもよい。
+- 手動取得: README の手順どおり `gguf.txt` から URL を変換して `wget` し、**`sha256sum --check $(MODEL).sha256sum`** で検証してもよい。
 
 ## 制約・既知の制限
 

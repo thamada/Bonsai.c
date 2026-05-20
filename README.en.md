@@ -49,6 +49,7 @@ An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for sm
 └── bonsai-8b/
     ├── Makefile
     ├── gguf.txt
+    ├── Bonsai-8B-Q1_0.gguf.sha256sum
     ├── cpu/
     │   ├── Makefile
     │   └── main.c
@@ -82,7 +83,8 @@ Here, that pipeline is **not** inside PyTorch; you can follow it **in the C sour
 - `libm`  
 - For **`cpu-omp`**, a compiler/toolchain with **OpenMP** (`libgomp` or `libomp`, commonly bundled with GCC/Clang)  
 - For **`cpu-blas`**, the above plus **OpenBLAS** (e.g. `libopenblas-dev` on Debian/Ubuntu)  
-- **`Bonsai-8B-Q1_0.gguf`** from [prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)
+- **`wget`** (for `make model` to fetch the GGUF)  
+- **`Bonsai-8B-Q1_0.gguf`** from [prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf) (via `make model`)
 
 On Ubuntu-like systems:
 
@@ -97,12 +99,20 @@ sudo apt install -y build-essential make
 
 `bonsai-8b/Makefile` defaults to **`MODEL=Bonsai-8B-Q1_0.gguf`**. Override with a path argument or `make run.cpu MODEL=...` if needed.
 
-The GGUF is **not** in the repo. Download using the URL in `bonsai-8b/gguf.txt` and place the file under `bonsai-8b/`.
+The GGUF is **not** in the repo. Run **`make model`** to download from the URL in `bonsai-8b/gguf.txt` and place the file under `bonsai-8b/`. It verifies SHA256 against **`Bonsai-8B-Q1_0.gguf.sha256sum`** after download (removes the file on failure).
+
+```bash
+cd bonsai-8b
+make model
+```
+
+Manual download:
 
 ```bash
 cd bonsai-8b
 url=$(sed 's|/blob/main/|/resolve/main/|' gguf.txt)
 wget -O Bonsai-8B-Q1_0.gguf "$url"
+sha256sum --check Bonsai-8B-Q1_0.gguf.sha256sum
 ```
 
 You should then have:
@@ -116,12 +126,13 @@ bonsai-8b/
 └── Bonsai-8B-Q1_0.gguf
 ```
 
-Verify integrity using hashes published on [Hugging Face](https://huggingface.co/prism-ml/Bonsai-8B-gguf/tree/main) if needed.
+Integrity is checked by **`make model`** using **`Bonsai-8B-Q1_0.gguf.sha256sum`**, which should match hashes on [Hugging Face](https://huggingface.co/prism-ml/Bonsai-8B-gguf/tree/main).
 
 ## Quick start
 
 ```bash
 cd bonsai-8b
+make model
 make build.cpu
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
@@ -301,10 +312,11 @@ make clean
 
 ### `No such file or directory`
 
-Wrong model path.
+Wrong model path. If the GGUF is missing, run **`make model`** from `bonsai-8b/`.
 
 ```bash
 ls -lh bonsai-8b/Bonsai-8B-Q1_0.gguf
+cd bonsai-8b && make model
 ```
 
 ```bash
@@ -352,4 +364,4 @@ The goal is to **understand, experiment with, and adapt** **Bonsai-8B-Q1_0** (GG
 - Design: `doc/design.md`  
 - Changelog: `doc/ChangeLog`  
 
-If something fails, check **`bonsai-8b/Makefile`** (`build.cpu`, `build.cpu-blas`, `run.cpu-blas`, …), per-subdir Makefiles, and the model path you pass at runtime.
+If something fails, check **`bonsai-8b/Makefile`** (`model`, `build.cpu`, `build.cpu-blas`, `run.cpu-blas`, …), per-subdir Makefiles, and the model path you pass at runtime.
