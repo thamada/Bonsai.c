@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 03:21:36
+
+**`bonsai-8b/gpu-cuda/kernels.cu`**: TurboQuant Attention を **環境変数で切替** — 既定 **F32 ミラー**（pack 圧縮 + F32 `kc`/`vc` 填充、品質優先）。**`TQ_PACK_ATTN=1`** で **pack のみ Attention**（実験・`attn=pack`）。**`TQ_F32_MIRROR`** / **`TQ_PACK_MAX_LAYER`** / **`TQ_PREFILL_MIRROR`** で層・フェーズ制御。**Flash Attention** タイル **`FA_BR` を 64→32** に変更。Attention カーネルへ TurboQuant テーブルを**ポインタ引数**で渡す。softmax 還元に **`fmaxf(l, 1e-20f)`**。
+
+**`doc/design.md`**: 上記（ミラー既定・`TQ_*` 環境変数表・`FA_BR=32`・pack Attention 接続条件）を GPU ベンチマーク注記・実行挙動・VRAM・Prefill/Decode 表・制約に反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 03:06:26
 
 **`README.md` / `README.en.md`**: GPU 付録を **`doc/design.md`** と整合 — **`--turboquant`** 時は F32 `kc`/`vc` と pack を併存、**Attention は F32 KV**、TurboQuant Attention 分岐は未接続、VRAM 節約なし。VRAM 表・Decode/Prefill の KV 書き込み・Flash Attention 節・制約・CLI **`--turboquant`**・ディレクトリ（**`turboquant.c`/`turboquant.h`**）・ソース案内を更新。
