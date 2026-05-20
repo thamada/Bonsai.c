@@ -206,7 +206,7 @@ static void pq_matvec(const float *m, const float *x, float *y, int dim)
     }
 }
 
-void polarquant_compress(const PolarQuantTables *pq, const float *x, uint8_t *out_indices)
+void polarquant_compress(const PolarQuantTables *pq, const float *x, uint8_t *out_entry)
 {
     const int d = pq->dim;
     float *y = (float *)malloc((size_t)d * sizeof(float));
@@ -217,31 +217,36 @@ void polarquant_compress(const PolarQuantTables *pq, const float *x, uint8_t *ou
         return;
     }
     pq_matvec(pq->pi, x, y, d);
+    float maxa = 0.0f;
+    for (int i = 0; i < d; i++) {
+        float a = fabsf(y[i]);
+        if (a > maxa) maxa = a;
+    }
+    float sc = maxa > 1e-8f ? maxa : 1.0f;
     for (int i = 0; i < d; i++)
-        idx[i] = pq_quantize_coord(pq, y[i]);
-    memset(out_indices, 0, (size_t)PQ_INDICES_BYTES(d, pq->polar_bits));
-    pq_pack_indices(pq, idx, out_indices);
+        idx[i] = pq_quantize_coord(pq, y[i] / sc);
+    memset(out_entry, 0, (size_t)PQ_ENTRY_BYTES(d, pq->polar_bits));
+    pq_pack_indices(pq, idx, out_entry);
+    memcpy(out_entry + PQ_INDICES_BYTES(d, pq->polar_bits), &sc, sizeof(float));
     free(y);
     free(idx);
 }
 
 float polarquant_inner_product(const PolarQuantTables *pq, const float *query,
-                               const uint8_t *key_indices)
+                               const uint8_t *key_entry)
 {
     const int d = pq->dim;
-    int *idx = (int *)malloc((size_t)d * sizeof(int));
-    float *q_rot = (float *)malloc((size_t)d * sizeof(float));
-    if (!idx || !q_rot) {
-        free(idx);
-        free(q_rot);
-        return 0.0f;
-    }
-    pq_unpack_indices(pq, key_indices, idx);
-    pq_matvec(pq->pi, query, q_rot, d);
+    float sc;
+    memcpy(&sc, key_entry + PQ_INDICES_BYTES(d, pq->polar_bits), sizeof(float));
     float s = 0.0f;
-    for (int i = 0; i < d; i++)
-        s += q_rot[i] * pq->centroids[idx[i]];
-    free(idx);
-    free(q_rot);
+    for (int col = 0; col < d; col++) {
+        float kc = 0.0f;
+        for (int k = 0; k < d; k++) {
+            int bitpos = k * pq->polar_bits;
+            int idx = (key_entry[bitpos >> 3] >> (bitpos & 7)) & ((1 << pq->polar_bits) - 1);
+            kc += pq->pi[k * d + col] * pq->centroids[idx];
+        }
+        s += query[col] * (kc * sc);
+    }
     return s;
 }

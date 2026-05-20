@@ -15,7 +15,8 @@ extern "C" {
 #define PQ_N_LEVELS_DEFAULT  (1 << PQ_POLAR_BITS_DEFAULT)
 
 #define PQ_INDICES_BYTES(d, bits)  (((d) * (bits) + 7) / 8)
-#define PQ_ENTRY_BYTES(d, bits)    PQ_INDICES_BYTES(d, bits)
+#define PQ_SCALE_BYTES             4
+#define PQ_ENTRY_BYTES(d, bits)    (PQ_INDICES_BYTES(d, bits) + PQ_SCALE_BYTES)
 
 typedef struct {
     int dim;
@@ -29,9 +30,9 @@ typedef struct {
 PolarQuantTables *polarquant_tables_create(int dim, int polar_bits, uint32_t seed);
 void              polarquant_tables_destroy(PolarQuantTables *pq);
 
-void  polarquant_compress(const PolarQuantTables *pq, const float *x, uint8_t *out_indices);
+void  polarquant_compress(const PolarQuantTables *pq, const float *x, uint8_t *out_entry);
 float polarquant_inner_product(const PolarQuantTables *pq, const float *query,
-                               const uint8_t *key_indices);
+                               const uint8_t *key_entry);
 
 #ifdef __cplusplus
 }

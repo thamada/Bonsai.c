@@ -4,6 +4,28 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 04:59:15
+
+**`README.md` / `README.en.md`**: GPU 付録を **`doc/design.md`** と整合 — **`turboquant` → `polarquant`**（**`--polarquant`**、**`polarquant.c`/`polarquant.h`**、**36 B/head** + **per-vector scale**、**pack+win64**、**`kv_pq_compress_*`**、**`dev_pq_score_at`**）。TurboQuant / **`TQ_*`** 環境変数の記述を削除。ベンチマーク表は **F32 KV 既定**と明記し **`--polarquant`** の VRAM・スループット注記を追加。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-21 04:57:57
+
+**`bonsai-8b/gpu-cuda/`**（**`polarquant` ブランチ**）: **PolarQuant Attention を pack+win ハイブリッドに** — 2-bit pack のみでは長めプロンプトで品質崩れ（「I'm not sure」ループ等）が残るため、**`kc_win`/`vc_win`**（層×**`FA_BR=64`**×`kv_dim` F32）と **`kc_win_pos`/`vc_win_pos`** を復活。**`kv_write_ring_*`** で圧縮直後にリング填充。**`dev_pq_win_hit`** / **`dev_pq_score_at`** / **`dev_pq_load_v_tile`**（win 分岐）で直近 64 位置は F32 dot、それ以前は pack（**centroid×scale**）。起動ログ **`attn=pack+win64`**。VRAM 比 **~5×**（pack+win 合算）。
+
+**`doc/design.md`**: 上記（pack+win・VRAM 表・実行挙動・Attention・CLI・量子化節・制約）を反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-21 04:47:56
+
+**`bonsai-8b/gpu-cuda/`**（**`polarquant` ブランチ**）: **`--polarquant` 品質崩れの修正** — Lloyd-Max は **[-1,1]** 前提だが K/V の **Pi 回転後ベクトル**は **`max|y| ≫ 1`** になり得るため、圧縮前に **`sc = max|y_rot|`** で正規化し entry 末尾に **float scale（4 B）** を保存。K/V 各 **36 B/head**（indices 32 + scale 4）。**`dev_pq_score_key`** / **`dev_pq_load_v_tile`** で **centroid×scale** を適用。**`polarquant_compress`** 同期。
+
+**`doc/design.md`**: 上記（**36 B/head**・per-vector scale・品質原因の注記、VRAM **~7×**）を反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 04:37:58
 
 **`bonsai-8b/gpu-cuda/`**（**`polarquant` ブランチ**）: **TurboQuant を撤去**し **PolarQuant のみ**に再実装 — **QJL**・**`kc_win`/`vc_win`/`win_pos` リング**・**`TQ_F32_MIRROR`** を削除。**`polarquant.c`/`polarquant.h`**（**`polarquant_tables_create`**、**`polarquant_compress`**）。K/V 各 **32 B/head**（**Pi** + 2-bit Lloyd-Max）。Attention は **pack のみ**（**`dev_pq_kv_offset`** で全系列 **`pos`** 参照）。CLI **`--polarquant`**（**`GpuConfig.polarquant_kv`**）。**`kv_pq_compress_*`**、**`dev_pq_score_key`**（**`q_rot·centroid`**）、**`dev_pq_load_v_tile`**。

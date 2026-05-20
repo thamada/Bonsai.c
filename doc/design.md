@@ -72,7 +72,7 @@
 | 表の指標（prefill） | stderr の `Prefill complete` 行（**`gpu_forward_prefill`** バッチ、`-use_fast_math`） |
 | 表の指標（decode） | decode 時間・tok/s（stderr の `Decode complete` 行） |
 | ビルド | `gpu-cuda/Makefile` 既定（**`-gencode arch=compute_86,code=compute_86`** PTX、ドライバ JIT） |
-| Attention | **Flash Attention + K/V shared staging**（**`FA_BR=64`** タイル、`FA_HD=128`、carveout=100）。KV 既定 F32。**`--polarquant`** は **pack KV のみ**（K/V 各 **32 B/head**、Attention は全系列 **`pos` 直参照**・リングなし） |
+| Attention | **Flash Attention + K/V shared staging**（**`FA_BR=64`** タイル、`FA_HD=128`、carveout=100）。KV 既定 F32。**`--polarquant`** は **pack + 直近 64 トークン F32 リング**（K/V pack 各 **36 B/head**、**`attn=pack+win64`**、**`dev_pq_win_hit`** でタグ一致時のみ F32 dot） |
 
 | バイナリ | prefill tok/s | decode 時間 | decode スループット |
 |----------|-------------:|----------:|-----------------:|
@@ -93,8 +93,8 @@
 | `bonsai-8b/cpu-omp/main.c` | **`cpu/main.c` をベースに OpenMP を付与した派生**（挙動確認はまず `cpu` を正とする）。**単一 `main.c`**（+ OpenMP）。 |
 | `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。**単一 `main.c`**（+ OpenMP + OpenBLAS）。 |
 | `bonsai-8b/gpu-cuda/main.c` | **`cpu-blas` をベースに CPU 演算を GPU API 呼び出しへ置換したホスト側**（GGUF 読み込み・トークナイザ・サンプリングは CPU）。**`gpu.h`** の C API 経由で **`kernels.cu`** を呼ぶ。 |
-| `bonsai-8b/gpu-cuda/kernels.cu` | **CUDA カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、単トークン／**バッチ** Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**PolarQuant** KV 圧縮／pack Attention（**`dev_pq_score_key`**・**`dev_pq_load_v_tile`**）、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`** 等）。 |
-| `bonsai-8b/gpu-cuda/polarquant.c` / **`polarquant.h`** | **PolarQuant** CPU 参照（**`polarquant_tables_create`**、**`polarquant_compress`**、**`polarquant_inner_product`**）。デバイス側は **`kernels.cu`**（**`dev_pq_compress_par`**、**`kv_pq_compress_*`**、pack Attention）。 |
+| `bonsai-8b/gpu-cuda/kernels.cu` | **CUDA カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、単トークン／**バッチ** Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**PolarQuant** KV 圧縮／**pack+win** Attention（**`dev_pq_score_at`**・**`dev_pq_load_v_tile`**・**`kv_write_ring_*`**）、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`** 等）。 |
+| `bonsai-8b/gpu-cuda/polarquant.c` / **`polarquant.h`** | **PolarQuant** CPU 参照（**`polarquant_tables_create`**、**`polarquant_compress`**、**`polarquant_inner_product`**）。デバイス側は **`kernels.cu`**（**`dev_pq_compress_par`**、**`kv_pq_compress_*`**、**`dev_pq_win_hit`**）。 |
 | `bonsai-8b/gpu-cuda/gpu.h` | **`GpuModel`** / **`gpu_model_create`** / **`gpu_forward`** / **`gpu_forward_prefill`** / **`gpu_copy_logits`** 等の C API（**`extern "C"`**）。**`GpuConfig.polarquant_kv`**（**`--polarquant`**）。 |
 | `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成（**`main.c`**・**`polarquant.c`** → **`cc`**、**`kernels.cu`** → **`nvcc`**、リンクも **`nvcc`**。**`-lcudart`**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`** PTX、**`-use_fast_math`**）。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL（`blob/main` 形式）。 |
@@ -245,11 +245,11 @@ make build
 
 **`gpu-cuda`** は **`cpu-blas`** と同一の GGUF 読み込み・**`chat_encode`**・RoPE パラメータ・CLI を持つ。差分は forward の実行先・メモリ配置・**prefill / decode の経路分割**である。
 
-1. **起動時**: **`gpu_print_device_info()`** → **`flash_attn_init_once()`**（carveout=100）。GGUF mmap 後、重み・norm・KV を VRAM へ。**KV 既定**: F32 **`kc`/`vc`**（`n_layers × max_seq × kv_dim`）。**`--polarquant`** かつ **`head_dim == 128`**: **`kc_pack`** / **`vc_pack`**（K/V 各 **32 B/head**、**Pi** 回転 + Lloyd-Max **2-bit**、QJL なし）。**フル F32 `kc`/`vc` は確保しない**。PolarQuant テーブル（**`centroids`/`boundaries`/`pi`**）を H2D。起動ログ **`attn=pack`**。VRAM 目安は pack で F32 全系列の約 **8×** 削減（起動時に比率を表示）。
-2. **Prefill**（**`n_prompt > 1`**）: **`gpu_forward_prefill`**。**`--polarquant`**: 各層 **`kv_pq_compress_batch_kernel`** → **`flash_attn_prefill_gqa_kernel`**（**`use_pq=1`**、K は **`dev_pq_score_key`**（**`q_rot·centroid`**）、V は **`dev_pq_load_v_tile`**）。因果 **`npos = t + 1`**。
-3. **Decode**: **1 トークンずつ `gpu_forward`**。**`--polarquant`**: **`kv_pq_compress_kernel`** → pack **`flash_attn_gqa_kernel`**（全過去位置を **`dev_pq_kv_offset(layer, kvh, pos, …)`** で pack から参照。リング・タグなし）。
+1. **起動時**: **`gpu_print_device_info()`** → **`flash_attn_init_once()`**（carveout=100）。GGUF mmap 後、重み・norm・KV を VRAM へ。**KV 既定**: F32 **`kc`/`vc`**（`n_layers × max_seq × kv_dim`）。**`--polarquant`** かつ **`head_dim == 128`**: **`kc_pack`** / **`vc_pack`**（K/V 各 **36 B/head**＝indices 32 + **per-vector scale** 4、**Pi** 回転 → **`sc=max|y_rot|`** で **[-1,1]** 正規化 → Lloyd-Max **2-bit**、QJL なし）と **`kc_win`/`vc_win`**（層あたり **`FA_BR×kv_dim`** F32）・**`kc_win_pos`/`vc_win_pos`**（層あたり **`FA_BR`** タグ）。**フル F32 `kc`/`vc` は確保しない**。PolarQuant テーブルを H2D。起動ログ **`attn=pack+win64`**。VRAM 目安は **pack+win** で F32 全系列の約 **5×** 削減（起動時に比率を表示。ログの **72 B/head** は K+V pack 合計）。
+2. **Prefill**（**`n_prompt > 1`**）: **`gpu_forward_prefill`**。**`--polarquant`**: 各層 **`kv_pq_compress_batch_kernel`** → **`kv_write_ring_batch_kernel`**（pack + F32 リング）→ **`flash_attn_prefill_gqa_kernel`**（**`use_pq=1`**）。因果 **`npos = t + 1`**。プロンプト長 **≤ 64** なら Attention は実質すべて F32 リング参照。
+3. **Decode**: **1 トークンずつ `gpu_forward`**。**`--polarquant`**: **`kv_pq_compress_kernel`** → **`kv_write_ring_kernel`** → **`flash_attn_gqa_kernel`**（**`attn_pos=pos`**）。直近 **64** 位置は **`dev_pq_win_hit`** で F32 K/V dot、それ以前は pack（**`dev_pq_score_at`** / **`dev_pq_load_v_tile`**）。
 4. **Q1_0 GEMV**: 単トークン経路は **`quantize_q8_0_kernel` + `mm_q1_0_kernel`**、prefill バッチ経路は **`quantize_q8_0_batch_kernel` + `mm_q1_0_batch_kernel`**（いずれも **`cpu-blas`** 準拠ロジック）。
-5. **Attention（共通）**: **`FA_BR=64`** タイル（Flash Attention 用。KV リング幅ではない）、shared staging（`k_tile`/`v_tile` 各 **64×128**、合計 ≈ **128 KB**/ブロック）、**online softmax**（**`o_sh / fmaxf(l, 1e-20f)`**）、GQA。**`use_pq=0`**: 全系列 F32 `kc`/`vc`。**`use_pq=1`**（**`--polarquant`**）: タイル内各 **`pos`** を pack から直接参照 — K は **`q_rot = Pi·q`** と量子化 **`centroids[idx]`** の内積、V は回転空間の centroid を **`Pi^T`** で元空間へ復元。
+5. **Attention（共通）**: **`FA_BR=64`** タイル（Flash Attention 用。**PolarQuant の F32 リング幅**も **`FA_BR`**）、shared staging（`k_tile`/`v_tile` 各 **64×128**、合計 ≈ **128 KB**/ブロック）、**online softmax**（**`o_sh / fmaxf(l, 1e-20f)`**）、GQA。**`use_pq=0`**: 全系列 F32 `kc`/`vc`。**`use_pq=1`**（**`--polarquant`**）: 各 **`pos`** で **`slot=pos%FA_BR`**。**`win_pos[slot]==pos`** かつ **`attn_pos-pos < FA_BR`** のとき K/V は F32 リング（**`dev_pq_score_at`** / **`dev_pq_load_v_tile`** の win 分岐）。それ以外は pack — K スコアは **`q · (Pi^T · (sc·centroid[idx]))`**（**`dev_pq_score_key`**）、V は **`Pi^T`** で回転空間の量子化ベクトルを元空間へ復元。
 6. **サンプリング**: prefill 直後および各 decode ステップ後に **`gpu_copy_logits`** で logits を D2H し、CPU で温度・top-p サンプリング（CPU バリアントと同ロジック）。
 
 #### VRAM 配置（`gpu_model_create`、README 付録と同内容）
@@ -259,13 +259,14 @@ make build
 | 重み | `token_embd`、各層 `wq/wk/wv/wo/gate/up/down`、`output` | Q1_0（g128） |
 | 重み | `attn_norm`、`q_norm`、`k_norm`、`ffn_norm`、`output_norm` | F32 |
 | KV キャッシュ（既定） | `kc`、`vc` | F32、`n_layers × max_seq × kv_dim` |
-| KV キャッシュ（`--polarquant`） | `kc_pack`, `vc_pack` | K/V 各 **32 B/head**（**Pi** + 2-bit Lloyd-Max）。フル `kc`/`vc` **なし**（約 **8×** VRAM 削減） |
+| KV キャッシュ（`--polarquant`） | `kc_pack`, `vc_pack` | K/V 各 **36 B/head**（indices + **float scale**）。全系列 pack |
+| KV リング（`--polarquant`） | `kc_win`, `vc_win`, `kc_win_pos`, `vc_win_pos` | 層あたり直近 **`FA_BR=64`** スロットの F32 K/V + 位置タグ（**`win_pos[slot]=pos`**）。pack+win 合算でフル F32 比約 **5×** VRAM 削減 |
 | Decode 活性化 | `x`、`xb`、`xb2`、`q`、`k`、`v`、`hb`、`hb2`、`logits`、`q8` | F32 / Q8_0 |
 | Prefill バッチ | `x_batch`、`xb_batch`、… `q8_batch`、`tokens_dev`、`rope_batch` 等 | **`batch_cap = max_seq`**（**`-l`**）分を事前確保 |
 
 #### Decode 1 ステップ（`gpu_forward`、レイヤー `l` あたり）
 
-Embedding → … → RoPE → KV（既定 F32 D2D / **`--polarquant`**: **`kv_pq_compress_kernel`** で pack）→ **`flash_attn_gqa_kernel`**（pack または F32）→ `wo` + 残差 → FFN → … → `logits`。
+Embedding → … → RoPE → KV（既定 F32 D2D / **`--polarquant`**: **`kv_pq_compress_kernel`** + **`kv_write_ring_kernel`**）→ **`flash_attn_gqa_kernel`**（pack+win または F32）→ `wo` + 残差 → FFN → … → `logits`。
 
 #### Prefill バッチ（`gpu_forward_prefill`、カーネル対応）
 
@@ -276,11 +277,11 @@ Embedding → … → RoPE → KV（既定 F32 D2D / **`--polarquant`**: **`kv_p
 | Q/K/V/O, gate/up/down | `gpu_mm_batch` | `(token, 出力行)` |
 | Q/K head norm | `rmsnorm_head_batch_kernel` | `(token, head)` |
 | RoPE | `rope_neox_batch_kernel` | `(token, head)` |
-| KV 書き込み | **`--polarquant`**: `kv_pq_compress_batch` / 既定: `kv_write_batch` | pack のみ、または全系列 F32 |
-| Attention | `flash_attn_prefill_gqa_kernel` | `(token, head)`、因果 `npos = t + 1`（pack または F32） |
+| KV 書き込み | **`--polarquant`**: `kv_pq_compress_batch` + `kv_write_ring_batch` / 既定: `kv_write_batch` | pack + F32 リング、または全系列 F32 |
+| Attention | `flash_attn_prefill_gqa_kernel` | `(token, head)`、因果 `npos = t + 1`（pack+win または F32） |
 | 残差・SwiGLU | `add_batch_kernel`、`swiglu_batch_kernel` | 要素並列 |
 
-LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の Decode は **`pos = n_prompt`** から pack に追記。長文も **全系列 pack** を **`pos` インデックスで参照**（旧 TurboQuant の **`pos % FA_BR` リングエイリアス**は廃止）。
+LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の Decode は **`pos = n_prompt`** から pack + リングへ追記。長文の古い位置は pack を **`pos` 直参照**。**F32 リング**は **`slot=pos%FA_BR`** だが **`win_pos[slot]==pos`** のときだけ有効（TurboQuant 時代の無タグ **`pos%FA_BR` エイリアス**は廃止）。
 
 進捗表示・スループット計測の**出力形式**は **「進捗表示とスループット計測（全バリアント共通）」** と同様（**`generate()`** 内の static ヘルパ）。prefill プログレスバーの更新タイミングは上記のとおり **`gpu-cuda` のみ異なる**。
 
@@ -294,7 +295,7 @@ LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の De
 | `-k` | Top-p | 実装既定値に従う |
 | `-s` | 乱数シード | 実装既定値に従う |
 | `-l` | 最大シーケンス長 | 実装既定値に従う |
-| `--polarquant` | PolarQuant pack KV（K/V 各 2-bit、**32 B/head**）+ pack Attention | **無効**（既定は F32 全系列 KV）。**`gpu-cuda`** のみ。**`head_dim != 128`** で自動無効化 |
+| `--polarquant` | PolarQuant **pack+win** KV（2-bit + **per-vector scale**、**36 B/head**、直近 **64** トークン F32 リング） | **無効**（既定は F32 全系列 KV）。**`gpu-cuda`** のみ。**`head_dim != 128`** で自動無効化 |
 
 ## アーキテクチャ（`cpu/main.c` / `gpu-cuda/`）
 
@@ -327,7 +328,7 @@ LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の De
 - **`cpu`**: **`dot_q1_0_row`** / **`mm_q1_0_rows`** で融合行内積（`ggml-quants.c` の dequantize + 内積と同等、中間 FP32 ブロックなし）。
 - **`cpu-omp`**: 同上。行ループを **`#pragma omp parallel for`** で並列化。
 - **`cpu-blas`**: **`quantize_row_q8_0`** + **`vec_dot_q1_0_q8_0`**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠。AVX2 で SIMD、非 AVX2 は generic 参照）。**`State`** に **`BlockQ8_0 *q8`** を確保（`max(dim, hidden_dim) / QK8_0` ブロック）。
-- **`gpu-cuda`**: **Q8_0 活性化 + `vec_dot_q1_0_q8_0`** CUDA カーネル。Attention は **`FA_BR=64`** Flash Attention。**`--polarquant`**（[arXiv:2502.02617](https://arxiv.org/abs/2502.02617)、**`head_dim=128`**）: **Pi** 回転 + Lloyd-Max **2-bit** の pack KV（K/V 共通 **32 B/head**、QJL なし）。Attention は **pack のみ**（全系列 **`pos`** 参照、F32 リング廃止）。
+- **`gpu-cuda`**: **Q8_0 活性化 + `vec_dot_q1_0_q8_0`** CUDA カーネル。Attention は **`FA_BR=64`** Flash Attention。**`--polarquant`**（[arXiv:2502.02617](https://arxiv.org/abs/2502.02617)、**`head_dim=128`**）: **Pi** 回転 + **`sc=max|y_rot|`** + Lloyd-Max **2-bit** の全系列 pack（K/V 各 **36 B/head**、QJL なし）+ 直近 **64** トークン **F32 リング**（**`dev_pq_win_hit`**）。pack 区間は score/V で **centroid×scale**。**pack のみ**（scale 修正前）ではプロンプト次第で品質崩れ（例「I'm not sure」ループ）があり得る。
 
 ### RoPE
 
@@ -353,7 +354,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（参考 decode **30.79 tok/s**）を推奨。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。
-- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s** / decode **~50 tok/s** は **F32 KV 既定**の計測（**`--polarquant`** の decode スループット・品質は**要再計測**）。**`--polarquant`**: KV VRAM 約 **8×** 削減（pack のみ）。**`head_dim != 128`** で PolarQuant 自動無効化。旧 **TurboQuant**（QJL + pack+win リング）は **`polarquant` ブランチで撤去**（長文ループのリングエイリアスが品質崩れの主因だったため）。
+- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s** / decode **~50 tok/s** は **F32 KV 既定**の計測（**`--polarquant`** の decode スループットは**要再計測**）。**`--polarquant`**: KV VRAM 約 **5×** 削減（pack+win、起動ログ参照）。**`head_dim != 128`** で PolarQuant 自動無効化。旧 **TurboQuant**（QJL 付き pack+win）は **`polarquant` ブランチで撤去**；PolarQuant は **QJL なし**の pack+win を再導入（**`win_pos` タグ**でエイリアス回避）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。
