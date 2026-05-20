@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 02:04:11
+
+**`README.md` / `README.en.md`**: **本文を CPU 3 バリアントに集約**（ディレクトリツリー・要件・ベンチマークから **`gpu-cuda`** を除外）。**付録**「NVIDIA CUDA 実装（`gpu-cuda`）について」を追加 — 目的外・将来別リポジトリ移行予定の注記、VRAM 配置表、**`generate`** / **`gpu_forward`** / **`gpu_forward_prefill`** の技術メモ（カーネル対応表・Flash Attention・GEMV）、ビルド／実行・GPU ベンチマーク・トラブルシュート。
+
+**`.gitignore`**: **`bonsai-8b/gpu-cuda/*.o`** を追加。
+
+**`doc/design.md`**: スコープ（CPU 主眼・**`gpu-cuda`** 付録）、README 本文／付録との分担、参考ベンチマークの所在、**`.gitignore`**、**gpu-cuda** VRAM 表・forward ステップ表、制約・ドキュメント間役割を更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 01:39:52
 
 **`README.md` / `README.en.md`**: **`gpu-cuda`** の **prefill バッチ並列**（**`gpu_forward_prefill`**）と **decode 逐次**（**`gpu_forward`**）、Flash Attention + K/V shared staging、VRAM バッチバッファ、プログレスバー挙動、**`-l` / max_seq** 制約、GPU ベンチマーク注記、コードベース案内（**`gpu.h`**）を追記。

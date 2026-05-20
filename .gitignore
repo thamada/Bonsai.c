@@ -12,6 +12,7 @@ bonsai-8b/cpu/bonsai-cpu
 bonsai-8b/cpu-omp/bonsai-cpu-omp
 bonsai-8b/cpu-blas/bonsai-cpu-blas
 bonsai-8b/gpu-cuda/bonsai-gpu-cuda
+bonsai-8b/gpu-cuda/*.o
 bonsai-8b/cpu/qwen3-cpu
 # 誤って bonsai-8b/ 直下に生成された古いバイナリ（無視）
 bonsai-8b/qwen3-cpu
