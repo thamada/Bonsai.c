@@ -29,7 +29,7 @@
 | `bonsai-8b/cpu/main.c` | **CPU、単スレッド** | GGUF mmap。**Q1_0** は融合行内積（**`dot_q1_0_row`**、中間 FP32 展開なし）。他量子化型はブロック単位で部分復元して GEMV。Norm 等は F32。`libm` のみ。 |
 | `bonsai-8b/cpu-omp/main.c` | **CPU、OpenMP マルチスレッド** | **`cpu`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は融合行内積（**`mm_q1_0_rows`** を OpenMP 行並列）。他量子化型はブロック dequant + OpenMP。Attention・SwiGLU 等も **OpenMP**。 |
 | `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は活性化を **Q8_0** 化して **`vec_dot_q1_0_q8_0`**（AVX2 時は ggml-cpu x86 準拠 SIMD、**`-mfma`**）。Attention はヘッドあたり **2 回の `cblas_sgemv`**。F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
-| `bonsai-8b/gpu-cuda/main.c` + **`kernels.cu`** | **NVIDIA GPU、CUDA** | **`cpu-blas`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。起動時に重み・norm・KV 用バッファを **VRAM** へ **`cudaMemcpy`**。推論ホットパスは **`kernels.cu`**。**Q1_0 GEMV** は **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**。**Attention** は **Flash Attention 風 online softmax**（**`flash_attn_gqa_kernel`**、**`att` 行列非物質化**、GQA 対応）。サンプリングのみ CPU（logits D2H）。 |
+| `bonsai-8b/gpu-cuda/main.c` + **`kernels.cu`** | **NVIDIA GPU、CUDA** | **`cpu-blas`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。起動時に重み・norm・KV 用バッファを **VRAM** へ **`cudaMemcpy`**。推論ホットパスは **`kernels.cu`**。**Q1_0 GEMV** は **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**。**Attention** は **Flash Attention + K/V shared-memory タイル staging**（**`flash_attn_gqa_kernel`**、online softmax、**`att` 非物質化**、GQA 対応）。サンプリングのみ CPU（logits D2H）。 |
 
 メタデータの照合は **GGUF 内の `qwen3.*` プレフィックス**（実装上のバイト列。`embedding_length` 等）と tokenizer 系キーで行う。実装コメントは「dense デコーダ」「Bonsai」と整合する。
 
@@ -68,7 +68,7 @@
 | コマンド | `./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
 | ワークロード | 上記 CPU 表と同じ（prefill 18 + decode 16） |
 | ビルド | `gpu-cuda/Makefile` 既定（**`-gencode arch=compute_86,code=compute_86`** PTX、ドライバ JIT） |
-| Attention | **Flash Attention**（**`flash_attn_gqa_kernel`**、`FA_BR=64` タイル、online softmax） |
+| Attention | **Flash Attention + K/V shared staging**（**`flash_attn_gqa_kernel`**、`FA_BR=64` / **`FA_HD=128`** タイル、shared ≈ 65 KB、**`cudaFuncAttributePreferredSharedMemoryCarveout=100`**） |
 
 | バイナリ | prefill tok/s | decode 時間 | decode スループット | 備考 |
 |----------|-------------:|----------:|-----------------:|------|
@@ -89,7 +89,7 @@
 | `bonsai-8b/cpu-omp/main.c` | **`cpu/main.c` をベースに OpenMP を付与した派生**（挙動確認はまず `cpu` を正とする）。**単一 `main.c`**（+ OpenMP）。 |
 | `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。**単一 `main.c`**（+ OpenMP + OpenBLAS）。 |
 | `bonsai-8b/gpu-cuda/main.c` | **`cpu-blas` をベースに CPU 演算を GPU API 呼び出しへ置換したホスト側**（GGUF 読み込み・トークナイザ・サンプリングは CPU）。**`gpu.h`** の C API 経由で **`kernels.cu`** を呼ぶ。 |
-| `bonsai-8b/gpu-cuda/kernels.cu` | **CUDA カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、RMSNorm、RoPE、SwiGLU、**Flash Attention** 等）。 |
+| `bonsai-8b/gpu-cuda/kernels.cu` | **CUDA カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、RMSNorm、RoPE、SwiGLU、**Flash Attention + K/V shared staging**、**`flash_attn_init_once`** 等）。 |
 | `bonsai-8b/gpu-cuda/gpu.h` | **`GpuModel`** / **`gpu_model_create`** / **`gpu_forward`** 等の C API（**`extern "C"`**）。 |
 | `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成（**`main.c`** → **`cc`**、**`kernels.cu`** → **`nvcc`**、リンクも **`nvcc`**。**`-lcudart`**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`** PTX、**`-use_fast_math`**）。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL（`blob/main` 形式）。 |
@@ -238,9 +238,9 @@ make build
 
 **`gpu-cuda`** は **`cpu-blas`** と同一の GGUF 読み込み・**`chat_encode`**・RoPE パラメータ・CLI を持つ。差分は forward の実行先とメモリ配置である。
 
-1. **起動時**: **`gpu_print_device_info()`** で GPU 名等を stderr に表示。GGUF を mmap したうえで、重み blob・RMSNorm 用 F32・各層 KV キャッシュ・活性化バッファを **VRAM** に **`cudaMemcpy`** でアップロード。**`GpuModel`**（**`gpu.h`**）がデバイス側ポインタを保持する（推論中も mmap は保持し、終了時に **`munmap`**）。
+1. **起動時**: **`gpu_print_device_info()`** で GPU 名等を stderr に表示。**`gpu_model_create`** 内で **`flash_attn_init_once()`** が **`flash_attn_gqa_kernel`** に **`cudaFuncAttributePreferredSharedMemoryCarveout=100`** を設定（shared ≈ 65 KB で既定 48 KB/ブロックを超えるため）。GGUF を mmap したうえで、重み blob・RMSNorm 用 F32・各層 KV キャッシュ・活性化バッファを **VRAM** に **`cudaMemcpy`** でアップロード。**`GpuModel`**（**`gpu.h`**）がデバイス側ポインタを保持する（推論中も mmap は保持し、終了時に **`munmap`**）。
 2. **Q1_0 GEMV**: 活性化をデバイス上で **Q8_0** 量子化し、**`vec_dot_q1_0_q8_0`** CUDA カーネルで行内積（**`cpu-blas`** の llama.cpp 準拠ロジックと同等）。
-3. **Attention（Flash Attention）**: **`flash_attn_gqa_kernel`** がクエリヘッドごとに 1 ブロック起動（**`<<<n_heads, FA_HD>>>`**、**`FA_HD=128`** は Bonsai-8B の **`head_dim`** 上限）。K/V は KV キャッシュから読み、シーケンス方向を **`FA_BR=64`** タイルで走査。**online softmax**（running max / sum）により **中間 `att` 行列を VRAM に展開しない**。GQA（**`n_kv_heads < n_heads`**）に対応。
+3. **Attention（Flash Attention + K/V staging）**: **`flash_attn_gqa_kernel`** がクエリヘッドごとに 1 ブロック起動（**`<<<n_heads, FA_HD>>>`**、**`FA_HD=128`** は Bonsai-8B の **`head_dim`** 上限）。シーケンス方向を **`FA_BR=64`** タイルで走査し、各タイルで K/V を **`k_tile` / `v_tile`**（shared memory）へ協調ロードしてから QK^T・softmax・PV を実行（タイル内の global 参照はロード時のみ）。**online softmax**（running max / sum、**`fa_sh_reduce_max` / `fa_sh_reduce_sum`**）により **中間 `att` 行列を VRAM に展開しない**。GQA（**`n_kv_heads < n_heads`**）に対応。
 4. **その他**: RMSNorm・RoPE・SwiGLU・残差接続は **`kernels.cu`** 内の専用カーネル。F32 行はデバイス **`sgemv` 相当カーネル**。
 5. **サンプリング**: 最終 logits のみ **D2H** コピーし、CPU で温度・top-p サンプリング（3 CPU バリアントと同じロジック）。
 
@@ -288,7 +288,7 @@ make build
 - **`cpu`**: **`dot_q1_0_row`** / **`mm_q1_0_rows`** で融合行内積（`ggml-quants.c` の dequantize + 内積と同等、中間 FP32 ブロックなし）。
 - **`cpu-omp`**: 同上。行ループを **`#pragma omp parallel for`** で並列化。
 - **`cpu-blas`**: **`quantize_row_q8_0`** + **`vec_dot_q1_0_q8_0`**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠。AVX2 で SIMD、非 AVX2 は generic 参照）。**`State`** に **`BlockQ8_0 *q8`** を確保（`max(dim, hidden_dim) / QK8_0` ブロック）。
-- **`gpu-cuda`**: デバイス上で **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**。Attention は **Flash Attention**（**`flash_attn_gqa_kernel`**）。
+- **`gpu-cuda`**: デバイス上で **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**。Attention は **Flash Attention + K/V shared staging**（**`flash_attn_gqa_kernel`**、起動時 **`flash_attn_init_once`** で shared carveout 設定）。
 
 ### RoPE
 
@@ -314,7 +314,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（OpenBLAS + Q1_0 Q8_0 SIMD + Attention `sgemv` 集約、参考 decode **30.79 tok/s**）を推奨。**NVIDIA GPU** では **`gpu-cuda`**（Flash Attention、RTX 5090 参考 decode **~50 tok/s**）を試せる。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る（Q1_0 経路自体も **Q8_0 化**と異なる）。
-- **`gpu-cuda`** は **CUDA Toolkit**（**`nvcc`**）と NVIDIA ドライバが必要。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**（PTX + ドライバ JIT）。GPU アーキテクチャに合わせ **`gpu-cuda/Makefile`** の **`CUDA_GENCODE`** を変更すること。**VRAM** に Q1_0 重み + KV + 活性化が載る（8B Q1_0 で数 GiB 程度）。**`-use_fast_math`** 使用のため CPU バリアントと logits がわずかに異なり得るが、同一プロンプト・`-t 0` では生成テキスト一致を確認済み（参考環境）。
+- **`gpu-cuda`** は **CUDA Toolkit**（**`nvcc`**）と NVIDIA ドライバが必要。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**（PTX + ドライバ JIT）。GPU アーキテクチャに合わせ **`gpu-cuda/Makefile`** の **`CUDA_GENCODE`** を変更すること。**VRAM** に Q1_0 重み + KV + 活性化が載る（8B Q1_0 で数 GiB 程度）。**Flash Attention** は **`k_tile` / `v_tile` 等で shared ≈ 65 KB/ブロック**を使うため、**`cudaFuncAttributePreferredSharedMemoryCarveout`** の設定に依存する（失敗時は stderr に警告、性能低下の可能性）。**`-use_fast_math`** 使用のため CPU バリアントと logits がわずかに異なり得るが、同一プロンプト・`-t 0` では生成テキスト一致を確認済み（参考環境）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。
@@ -325,7 +325,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 - **`doc/design.md`（本書）**: 設計・仕様の静的説明。
 - **`doc/ChangeLog`**: 履歴。
 
-実装の最終的な挙動は **`bonsai-8b/cpu/main.c`** のソースを正とする。**`cpu-omp`** は **`cpu`** と同一 Q1_0 融合・**`chat_encode`**・RoPE で OpenMP のみ追加。**`cpu-blas`** は **`chat_encode`**・RoPE は揃えるが、**Q1_0** は llama.cpp 準拠の **Q8_0 活性化 + SIMD 内積**を採用する。**`gpu-cuda`** は **`cpu-blas`** と同趣旨の Q1_0 経路を GPU 上で実行し、Attention を **Flash Attention** に置き換える。差分は OpenMP 並列化・Q1_0 カーネル・OpenBLAS / CUDA 利用。浮動小数の結合順などで数値差が出うる。スループット比較の際はビルドフラグ（`-march=native`、`-ffast-math`、`-mfma`、`-use_fast_math`）と OpenBLAS スレッド設定に注意する。
+実装の最終的な挙動は **`bonsai-8b/cpu/main.c`** のソースを正とする。**`cpu-omp`** は **`cpu`** と同一 Q1_0 融合・**`chat_encode`**・RoPE で OpenMP のみ追加。**`cpu-blas`** は **`chat_encode`**・RoPE は揃えるが、**Q1_0** は llama.cpp 準拠の **Q8_0 活性化 + SIMD 内積**を採用する。**`gpu-cuda`** は **`cpu-blas`** と同趣旨の Q1_0 経路を GPU 上で実行し、Attention を **Flash Attention + K/V shared staging** に置き換える。差分は OpenMP 並列化・Q1_0 カーネル・OpenBLAS / CUDA 利用。浮動小数の結合順などで数値差が出うる。スループット比較の際はビルドフラグ（`-march=native`、`-ffast-math`、`-mfma`、`-use_fast_math`）と OpenBLAS スレッド設定に注意する。
 
 ## 補足：`design.md` 更新時のチェックリスト
 

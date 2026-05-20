@@ -1,7 +1,7 @@
 /*
  * Bonsai GPU forward — CUDA kernels。
  * Q1_0 GEMV: 活性化 Q8_0 化 + vec_dot_q1_0_q8_0（cpu-blas 準拠）。
- * Attention: Flash Attention 風オンライン softmax（K/V タイル走査、att 行列非物質化）。
+ * Attention: Flash Attention + K/V shared-memory タイル staging（online softmax）。
  */
 
 #include "gpu.h"
@@ -19,37 +19,36 @@
 
 #define DT_Q1_0 41
 
-/* Flash Attention タイル幅（シーケンス方向）。shared mem ≈ 2×FA_HD×FA_BR floats 以内 */
+/* Flash Attention: K/V タイルを shared memory に staging（head_dim=128 固定）。
+ * shared ≈ 2×FA_BR×FA_HD + q/o/scores/red ≈ 65 KB → carveout opt-in で 48 KB 超を許可。 */
 #define FA_BR  64
 #define FA_HD  128   /* Bonsai-8B head_dim */
 
-static __device__ float fa_block_reduce_max(float val)
+static __device__ float fa_sh_reduce_max(float val, float *red_sh)
 {
-    __shared__ float smem[FA_HD];
-    smem[threadIdx.x] = val;
+    red_sh[threadIdx.x] = val;
     __syncthreads();
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + s]);
+        if (threadIdx.x < s) red_sh[threadIdx.x] = fmaxf(red_sh[threadIdx.x], red_sh[threadIdx.x + s]);
         __syncthreads();
     }
-    return smem[0];
+    return red_sh[0];
 }
 
-static __device__ float fa_block_reduce_sum(float val)
+static __device__ float fa_sh_reduce_sum(float val, float *red_sh)
 {
-    __shared__ float smem[FA_HD];
-    smem[threadIdx.x] = val;
+    red_sh[threadIdx.x] = val;
     __syncthreads();
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        if (threadIdx.x < s) red_sh[threadIdx.x] += red_sh[threadIdx.x + s];
         __syncthreads();
     }
-    return smem[0];
+    return red_sh[0];
 }
 
 /*
  * GQA デコード Attention（1 クエリ位置 × 全ヘッド）。
- * Flash Attention の online softmax で att[npos] を materialize しない。
+ * Flash Attention の online softmax。K/V タイルを shared に staging してから QK^T / PV。
  * grid: n_heads blocks, block: FA_HD threads。
  */
 static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
@@ -65,9 +64,12 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
     const float *vbase = vc + (size_t)kvh * hd;
     float *oh = xb + (size_t)h * hd;
 
+    __shared__ float k_tile[FA_BR][FA_HD];
+    __shared__ float v_tile[FA_BR][FA_HD];
     __shared__ float q_sh[FA_HD];
     __shared__ float o_sh[FA_HD];
     __shared__ float scores[FA_BR];
+    __shared__ float red_sh[FA_HD];
 
     if (threadIdx.x < hd) {
         q_sh[threadIdx.x] = qh[threadIdx.x];
@@ -82,17 +84,25 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
         int tc = npos - t0;
         if (tc > FA_BR) tc = FA_BR;
 
+        /* K/V タイルを協調ロード（global はここだけ。以降は shared 参照） */
+        for (int idx = threadIdx.x; idx < tc * hd; idx += blockDim.x) {
+            int j = idx / hd;
+            int d = idx - j * hd;
+            k_tile[j][d] = kbase[(size_t)(t0 + j) * kv_dim + d];
+            v_tile[j][d] = vbase[(size_t)(t0 + j) * kv_dim + d];
+        }
+        __syncthreads();
+
         if (threadIdx.x < tc) {
-            const float *kt = kbase + (size_t)(t0 + threadIdx.x) * kv_dim;
             float s = 0.0f;
             for (int d = 0; d < hd; d++)
-                s += q_sh[d] * kt[d];
+                s += q_sh[d] * k_tile[threadIdx.x][d];
             scores[threadIdx.x] = s * scale;
         }
         __syncthreads();
 
-        float m_tile = fa_block_reduce_max(
-            (threadIdx.x < tc) ? scores[threadIdx.x] : -1e30f);
+        float m_tile = fa_sh_reduce_max(
+            (threadIdx.x < tc) ? scores[threadIdx.x] : -1e30f, red_sh);
         __syncthreads();
 
         float m_new = fmaxf(m, m_tile);
@@ -101,18 +111,18 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
         if (threadIdx.x < hd)
             o_sh[threadIdx.x] *= alpha;
 
-        float p_local = 0.0f;
         if (threadIdx.x < tc)
-            p_local = expf(scores[threadIdx.x] - m_new);
-        float l_tile = fa_block_reduce_sum(p_local);
+            scores[threadIdx.x] = expf(scores[threadIdx.x] - m_new);
+        __syncthreads();
+
+        float l_tile = fa_sh_reduce_sum(
+            (threadIdx.x < tc) ? scores[threadIdx.x] : 0.0f, red_sh);
         __syncthreads();
 
         if (threadIdx.x < hd) {
             float acc = 0.0f;
-            for (int j = 0; j < tc; j++) {
-                float p = expf(scores[j] - m_new);
-                acc += p * vbase[(size_t)(t0 + j) * kv_dim + threadIdx.x];
-            }
+            for (int j = 0; j < tc; j++)
+                acc += scores[j] * v_tile[j][threadIdx.x];
             o_sh[threadIdx.x] += acc;
         }
         __syncthreads();
@@ -123,6 +133,19 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
 
     if (threadIdx.x < hd)
         oh[threadIdx.x] = o_sh[threadIdx.x] / l;
+}
+
+static void flash_attn_init_once(void)
+{
+    static int done = 0;
+    if (done) return;
+    cudaError_t err = cudaFuncSetAttribute(
+        flash_attn_gqa_kernel,
+        cudaFuncAttributePreferredSharedMemoryCarveout,
+        100);
+    if (err != cudaSuccess)
+        fprintf(stderr, "Warning: flash_attn shared carveout: %s\n", cudaGetErrorString(err));
+    done = 1;
 }
 
 #define CUDA_CHECK(call) do { \
@@ -441,6 +464,8 @@ static void build_rope_cache_host(const GpuConfig *c, int pos, float *cache)
 
 GpuModel *gpu_model_create(const GpuConfig *cfg, const GpuWeightsHost *host)
 {
+    flash_attn_init_once();
+
     GpuModel *gm = (GpuModel *)calloc(1, sizeof(GpuModel));
     gm->cfg = *cfg;
 

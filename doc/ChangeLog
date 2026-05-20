@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 01:30:00
+
+**`bonsai-8b/gpu-cuda/kernels.cu`**: Flash Attention を **K/V shared-memory タイル staging** に変更。**`k_tile[FA_BR][FA_HD]` / `v_tile[FA_BR][FA_HD]`** へ協調ロード後に QK^T・softmax・PV。還元は **`fa_sh_reduce_max` / `fa_sh_reduce_sum`**（共有 **`red_sh`**）。shared ≈ 65 KB/ブロックのため **`flash_attn_init_once`**（**`gpu_model_create`** 内）で **`cudaFuncAttributePreferredSharedMemoryCarveout=100`** を設定。
+
+**`doc/design.md`**: 上記（K/V staging・shared 使用量・carveout 初期化）を実装バリアント表・GPU ベンチマーク注記・実行挙動・量子化節・制約に反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 01:24:04
 
 **`doc/design.md`**: **`gpu-cuda`** 節を実装と最終整合（**`main.c`** / **`kernels.cu`** の **`cc`** / **`nvcc`** 分割ビルド、起動時 **`gpu_print_device_info()`**、mmap 寿命、Flash Attention の **`<<<n_heads, FA_HD>>>`** 表記）。
