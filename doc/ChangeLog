@@ -4,6 +4,20 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 01:39:52
+
+**`README.md` / `README.en.md`**: **`gpu-cuda`** の **prefill バッチ並列**（**`gpu_forward_prefill`**）と **decode 逐次**（**`gpu_forward`**）、Flash Attention + K/V shared staging、VRAM バッチバッファ、プログレスバー挙動、**`-l` / max_seq** 制約、GPU ベンチマーク注記、コードベース案内（**`gpu.h`**）を追記。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-21 01:38:20
+
+**`bonsai-8b/gpu-cuda/`**: **Prefill バッチ並列**を追加。**`gpu_forward_prefill`**（**`gpu.h`**）がプロンプト全トークンを一度に forward。**`*_batch` CUDA カーネル**（embedding・RMSNorm・RoPE・Q1_0 GEMV・KV 書き込み・SwiGLU・残差）と因果 Attention **`flash_attn_prefill_gqa_kernel`** `<<<n_tokens×n_heads, FA_HD>>>`。**`GpuModel`** に **`x_batch` 等**（**`batch_cap=max_seq`**）を追加。**`main.c`** の **`generate()`** は **`n_prompt>1`** で prefill バッチ → decode 逐次（**`n_prompt==1`** は単トークン prefill）。**`flash_attn_init_once`** が prefill カーネルにも carveout を設定。
+
+**`doc/design.md`**: prefill/decode 経路分割・バッチ API・VRAM・プログレスバー挙動・Attention 2 系統を反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 01:30:00
 
 **`bonsai-8b/gpu-cuda/kernels.cu`**: Flash Attention を **K/V shared-memory タイル staging** に変更。**`k_tile[FA_BR][FA_HD]` / `v_tile[FA_BR][FA_HD]`** へ協調ロード後に QK^T・softmax・PV。還元は **`fa_sh_reduce_max` / `fa_sh_reduce_sum`**（共有 **`red_sh`**）。shared ≈ 65 KB/ブロックのため **`flash_attn_init_once`**（**`gpu_model_create`** 内）で **`cudaFuncAttributePreferredSharedMemoryCarveout=100`** を設定。

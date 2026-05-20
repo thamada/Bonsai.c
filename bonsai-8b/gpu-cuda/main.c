@@ -8,6 +8,8 @@
  *
  * GPU 方針（cpu-blas 準拠）:
  *   - 重み・KV キャッシュ・活性化は GPU 常駐。起動時に cudaMemcpy でアップロード。
+ *   - Prefill: 全プロンプトトークンをバッチ並列（gpu_forward_prefill）。
+ *   - Decode: 1 トークンずつ gpu_forward。
  *   - Q1_0 GEMV: 活性化 Q8_0 化 + vec_dot_q1_0_q8_0 CUDA カーネル。
  *   - Attention: Flash Attention（online softmax、att 行列非物質化、GQA 対応）。
  *   - サンプリングのみ CPU（logits を D2H コピー）。
@@ -1508,68 +1510,62 @@ static void throughput_summary(int n_prefill, double prefill_sec,
 static void generate(Model *m, int *prompt, int n_prompt,
                      int max_new, float temp, float topp, uint64_t seed) {
     uint64_t rng = seed ? seed : 1;
-    int token = prompt[0];
     int gen = 0;
-    int prefill_reported = 0;
-    int decode_timing = 0;
     double prefill_sec = 0.0;
 
     struct timespec t0, t1, t_prefill, t_decode;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    clock_gettime(CLOCK_MONOTONIC, &t_prefill);
-    if (n_prompt > 0)
-        prefill_progress_update(0, n_prompt);
 
-    for (int pos = 0; pos < n_prompt + max_new - 1; pos++) {
+    if (n_prompt > 0) {
+        if (n_prompt > m->cfg.max_seq) {
+            fprintf(stderr, "\n[prompt length %d exceeds max_seq %d]\n",
+                n_prompt, m->cfg.max_seq);
+            return;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t_prefill);
+        prefill_progress_update(0, n_prompt);
+        if (n_prompt > 1) {
+            gpu_forward_prefill(m->gpu, prompt, n_prompt);
+        } else {
+            forward(m, prompt[0], 0);
+        }
+        gpu_copy_logits(m->gpu, m->s.logits);
+        struct timespec t_now;
+        clock_gettime(CLOCK_MONOTONIC, &t_now);
+        prefill_sec = (t_now.tv_sec - t_prefill.tv_sec)
+            + (t_now.tv_nsec - t_prefill.tv_nsec) / 1e9;
+        prefill_progress_done(n_prompt, prefill_sec);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &t_decode);
+
+    for (int gen_i = 0; gen_i < max_new; gen_i++) {
+        int pos = n_prompt - 1 + gen_i;
         if (pos >= m->cfg.max_seq) {
             fprintf(stderr, "\n[max sequence length %d reached]\n", m->cfg.max_seq);
             break;
         }
 
-        forward(m, token, pos);
+        int next = sample_token(m->s.logits, m->cfg.vocab_size, temp, topp, &rng);
+        if (next == m->tok.eos || next == m->tok.eot) break;
+        gen++;
+        print_tok(&m->tok, next);
 
-        if (n_prompt > 0 && pos < n_prompt) {
-            prefill_progress_update(pos + 1, n_prompt);
-            if (pos == n_prompt - 1 && !prefill_reported) {
-                struct timespec t_now;
-                clock_gettime(CLOCK_MONOTONIC, &t_now);
-                prefill_sec = (t_now.tv_sec - t_prefill.tv_sec)
-                    + (t_now.tv_nsec - t_prefill.tv_nsec) / 1e9;
-                prefill_progress_done(n_prompt, prefill_sec);
-                prefill_reported = 1;
-                clock_gettime(CLOCK_MONOTONIC, &t_decode);
-                decode_timing = 1;
-            }
-        }
-
-        int next;
-        if (pos < n_prompt - 1) {
-            next = prompt[pos + 1];
-        } else {
-            if (!decode_timing) {
-                clock_gettime(CLOCK_MONOTONIC, &t_decode);
-                decode_timing = 1;
-            }
-            next = sample_token(m->s.logits, m->cfg.vocab_size, temp, topp, &rng);
-            if (next == m->tok.eos || next == m->tok.eot) break;
-            gen++;
-            print_tok(&m->tok, next);
-        }
-        token = next;
+        pos = n_prompt + gen_i;
+        if (pos >= m->cfg.max_seq) break;
+        forward(m, next, pos);
     }
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-    double decode_sec = 0.0;
-    if (decode_timing) {
-        decode_sec = (t1.tv_sec - t_decode.tv_sec)
-            + (t1.tv_nsec - t_decode.tv_nsec) / 1e9;
+    double decode_sec = (t1.tv_sec - t_decode.tv_sec)
+        + (t1.tv_nsec - t_decode.tv_nsec) / 1e9;
+    if (gen > 0)
         decode_progress_done(gen, decode_sec);
-    }
 
     printf("\n\n--- %d prompt tokens + %d generated tokens ---\n", n_prompt, gen);
     printf("--- %.1fs total ---\n", elapsed);
-    if (prefill_reported || decode_timing)
+    if (n_prompt > 0 || gen > 0)
         throughput_summary(n_prompt, prefill_sec, gen, decode_sec, elapsed);
 }
 

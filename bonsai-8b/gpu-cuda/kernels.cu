@@ -135,16 +135,113 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
         oh[threadIdx.x] = o_sh[threadIdx.x] / l;
 }
 
+/*
+ * Prefill Attention — 各プロンプト位置 t を block (t, head) で並列。
+ * 因果マスク: 位置 t は K/V の 0..t のみ参照（npos = t + 1）。
+ */
+static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
+    const float *kc, const float *vc, int n_tokens, int n_heads, int hd,
+    int kv_dim, int kv_mul, float scale)
+{
+    int bt = blockIdx.x;
+    int t = bt / n_heads;
+    int h = bt % n_heads;
+    if (t >= n_tokens || h >= n_heads || hd > FA_HD) return;
+
+    const int npos = t + 1;
+    int kvh = h / kv_mul;
+    const float *qh = q + ((size_t)t * n_heads + h) * hd;
+    const float *kbase = kc + (size_t)kvh * hd;
+    const float *vbase = vc + (size_t)kvh * hd;
+    float *oh = xb + ((size_t)t * n_heads + h) * hd;
+
+    __shared__ float k_tile[FA_BR][FA_HD];
+    __shared__ float v_tile[FA_BR][FA_HD];
+    __shared__ float q_sh[FA_HD];
+    __shared__ float o_sh[FA_HD];
+    __shared__ float scores[FA_BR];
+    __shared__ float red_sh[FA_HD];
+
+    if (threadIdx.x < hd) {
+        q_sh[threadIdx.x] = qh[threadIdx.x];
+        o_sh[threadIdx.x] = 0.0f;
+    }
+    __syncthreads();
+
+    float m = -1e30f;
+    float l = 0.0f;
+
+    for (int t0 = 0; t0 < npos; t0 += FA_BR) {
+        int tc = npos - t0;
+        if (tc > FA_BR) tc = FA_BR;
+
+        for (int idx = threadIdx.x; idx < tc * hd; idx += blockDim.x) {
+            int j = idx / hd;
+            int d = idx - j * hd;
+            k_tile[j][d] = kbase[(size_t)(t0 + j) * kv_dim + d];
+            v_tile[j][d] = vbase[(size_t)(t0 + j) * kv_dim + d];
+        }
+        __syncthreads();
+
+        if (threadIdx.x < tc) {
+            float s = 0.0f;
+            for (int d = 0; d < hd; d++)
+                s += q_sh[d] * k_tile[threadIdx.x][d];
+            scores[threadIdx.x] = s * scale;
+        }
+        __syncthreads();
+
+        float m_tile = fa_sh_reduce_max(
+            (threadIdx.x < tc) ? scores[threadIdx.x] : -1e30f, red_sh);
+        __syncthreads();
+
+        float m_new = fmaxf(m, m_tile);
+        float alpha = (m > -1e29f) ? expf(m - m_new) : 0.0f;
+
+        if (threadIdx.x < hd)
+            o_sh[threadIdx.x] *= alpha;
+
+        if (threadIdx.x < tc)
+            scores[threadIdx.x] = expf(scores[threadIdx.x] - m_new);
+        __syncthreads();
+
+        float l_tile = fa_sh_reduce_sum(
+            (threadIdx.x < tc) ? scores[threadIdx.x] : 0.0f, red_sh);
+        __syncthreads();
+
+        if (threadIdx.x < hd) {
+            float acc = 0.0f;
+            for (int j = 0; j < tc; j++)
+                acc += scores[j] * v_tile[j][threadIdx.x];
+            o_sh[threadIdx.x] += acc;
+        }
+        __syncthreads();
+
+        l = l * alpha + l_tile;
+        m = m_new;
+    }
+
+    if (threadIdx.x < hd)
+        oh[threadIdx.x] = o_sh[threadIdx.x] / l;
+}
+
 static void flash_attn_init_once(void)
 {
     static int done = 0;
     if (done) return;
-    cudaError_t err = cudaFuncSetAttribute(
+    cudaError_t err;
+    err = cudaFuncSetAttribute(
         flash_attn_gqa_kernel,
         cudaFuncAttributePreferredSharedMemoryCarveout,
         100);
     if (err != cudaSuccess)
         fprintf(stderr, "Warning: flash_attn shared carveout: %s\n", cudaGetErrorString(err));
+    err = cudaFuncSetAttribute(
+        flash_attn_prefill_gqa_kernel,
+        cudaFuncAttributePreferredSharedMemoryCarveout,
+        100);
+    if (err != cudaSuccess)
+        fprintf(stderr, "Warning: flash_attn_prefill shared carveout: %s\n", cudaGetErrorString(err));
     done = 1;
 }
 
@@ -219,6 +316,44 @@ static __global__ void mm_q1_0_kernel(float *o, const GpuBlockQ1_0 *W,
         (const GpuBlockQ1_0 *)((const char *)W + row * row_stride), q8);
 }
 
+static __global__ void quantize_q8_0_batch_kernel(const float *x, GpuBlockQ8_0 *y,
+    int nb, int n_in, int n_tokens)
+{
+    int tid = blockIdx.x;
+    int t = tid / nb;
+    int ib = tid % nb;
+    if (t >= n_tokens || ib >= nb) return;
+
+    const float *xin = x + (size_t)t * n_in + ib * GPU_QK8_0;
+    GpuBlockQ8_0 *yout = y + (size_t)t * nb + ib;
+
+    float amax = 0.0f;
+    for (int j = 0; j < GPU_QK8_0; j++) {
+        float v = fabsf(xin[j]);
+        if (v > amax) amax = v;
+    }
+    const float d  = amax / 127.0f;
+    const float id = amax != 0.0f ? 127.0f / amax : 0.0f;
+
+    yout->d = (uint16_t)__half_as_ushort(__float2half_rn(d));
+    for (int j = 0; j < GPU_QK8_0; j++)
+        yout->qs[j] = (int8_t)lrintf(xin[j] * id);
+}
+
+static __global__ void mm_q1_0_batch_kernel(float *o, const GpuBlockQ1_0 *W,
+    const GpuBlockQ8_0 *q8, int d, int nb, size_t row_stride, int n_in, int n_tokens)
+{
+    int flat = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = flat / d;
+    int r = flat - t * d;
+    if (t >= n_tokens || r >= d) return;
+
+    int q8_nb = n_in / GPU_QK8_0;
+    o[(size_t)t * d + r] = dev_vec_dot_q1_0_q8_0(nb,
+        (const GpuBlockQ1_0 *)((const char *)W + r * row_stride),
+        q8 + (size_t)t * q8_nb);
+}
+
 static __global__ void rmsnorm_kernel(float *o, const float *x, const float *w, int n, float eps)
 {
     __shared__ float shmem[256];
@@ -257,6 +392,54 @@ static __global__ void rmsnorm_head_kernel(float *vec, const float *w,
         seg[i] *= inv * w[i];
 }
 
+static __global__ void rmsnorm_batch_kernel(float *o, const float *x, const float *w,
+    int n, int n_tokens, float eps)
+{
+    int t = blockIdx.x;
+    if (t >= n_tokens) return;
+
+    const float *xin = x + (size_t)t * n;
+    float *xout = o + (size_t)t * n;
+
+    __shared__ float shmem[256];
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x)
+        ss += xin[i] * xin[i];
+    shmem[threadIdx.x] = ss;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) shmem[threadIdx.x] += shmem[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = rsqrtf(shmem[0] / (float)n + eps);
+    for (int i = threadIdx.x; i < n; i += blockDim.x)
+        xout[i] = xin[i] * inv * w[i];
+}
+
+static __global__ void rmsnorm_head_batch_kernel(float *vec, const float *w,
+    int n_heads, int hd, int n_tokens, float eps)
+{
+    int bt = blockIdx.x;
+    int t = bt / n_heads;
+    int h = bt % n_heads;
+    if (t >= n_tokens || h >= n_heads) return;
+
+    float *seg = vec + ((size_t)t * n_heads + h) * hd;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < hd; i += blockDim.x)
+        ss += seg[i] * seg[i];
+    __shared__ float shmem[256];
+    shmem[threadIdx.x] = ss;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) shmem[threadIdx.x] += shmem[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = rsqrtf(shmem[0] / (float)hd + eps);
+    for (int i = threadIdx.x; i < hd; i += blockDim.x)
+        seg[i] *= inv * w[i];
+}
+
 static __global__ void rope_neox_kernel(float *vec, const float *cache,
     int n_heads, int head_dim, int n_rot)
 {
@@ -275,10 +458,42 @@ static __global__ void rope_neox_kernel(float *vec, const float *cache,
     }
 }
 
+static __global__ void rope_neox_batch_kernel(float *vec, const float *cache,
+    int n_heads, int head_dim, int n_rot, int n_tokens)
+{
+    int bt = blockIdx.x;
+    int t = bt / n_heads;
+    int h = bt % n_heads;
+    if (t >= n_tokens || h >= n_heads) return;
+
+    float *row = vec + ((size_t)t * n_heads + h) * head_dim;
+    const float *rope = cache + (size_t)t * n_rot * 2;
+    int nhalf = head_dim / 2;
+    int npairs = n_rot / 2;
+    for (int j = threadIdx.x; j < nhalf && j < npairs; j += blockDim.x) {
+        int i0 = 2 * j;
+        float c = rope[i0], s = rope[i0 + 1];
+        float x0 = row[j];
+        float x1 = row[j + nhalf];
+        row[j]         = x0 * c - x1 * s;
+        row[j + nhalf] = x0 * s + x1 * c;
+    }
+}
+
 static __global__ void swiglu_kernel(float *hb, const float *hb2, int n)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+    float val = hb[i];
+    val = val / (1.0f + expf(-val));
+    hb[i] = val * hb2[i];
+}
+
+static __global__ void swiglu_batch_kernel(float *hb, const float *hb2, int n, int n_tokens)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n * n_tokens;
+    if (i >= total) return;
     float val = hb[i];
     val = val / (1.0f + expf(-val));
     hb[i] = val * hb2[i];
@@ -289,6 +504,25 @@ static __global__ void add_kernel(float *a, const float *b, int n)
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     a[i] += b[i];
+}
+
+static __global__ void add_batch_kernel(float *a, const float *b, int n, int n_tokens)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n * n_tokens;
+    if (i >= total) return;
+    a[i] += b[i];
+}
+
+static __global__ void kv_write_batch_kernel(float *kc, const float *src,
+    int kv_dim, int n_tokens)
+{
+    int t = blockIdx.x;
+    if (t >= n_tokens) return;
+    const float *srow = src + (size_t)t * kv_dim;
+    float *drow = kc + (size_t)t * kv_dim;
+    for (int i = threadIdx.x; i < kv_dim; i += blockDim.x)
+        drow[i] = srow[i];
 }
 
 static __global__ void emb_q1_0_kernel(float *o, const GpuBlockQ1_0 *row, int nb)
@@ -302,6 +536,28 @@ static __global__ void emb_q1_0_kernel(float *o, const GpuBlockQ1_0 *row, int nb
         int bit_offset = j % 8;
         uint8_t bit = (uint8_t)((row[ib].qs[byte_index] >> bit_offset) & 1);
         o[ib * GPU_QK1_0 + j] = bit ? d : neg_d;
+    }
+}
+
+static __global__ void emb_q1_0_batch_kernel(float *o, const GpuBlockQ1_0 *embd,
+    const int *tokens, int nb, int dim, int n_tokens)
+{
+    int t = blockIdx.y;
+    int ib = blockIdx.x;
+    if (t >= n_tokens || ib >= nb) return;
+
+    size_t row_stride = (size_t)nb * sizeof(GpuBlockQ1_0);
+    const GpuBlockQ1_0 *row = (const GpuBlockQ1_0 *)((const char *)embd
+        + (size_t)tokens[t] * row_stride);
+
+    const float d = dev_f16f32(row[ib].d);
+    const float neg_d = -d;
+    float *out = o + (size_t)t * dim + ib * GPU_QK1_0;
+    for (int j = threadIdx.x; j < GPU_QK1_0; j += blockDim.x) {
+        int byte_index = j / 8;
+        int bit_offset = j % 8;
+        uint8_t bit = (uint8_t)((row[ib].qs[byte_index] >> bit_offset) & 1);
+        out[j] = bit ? d : neg_d;
     }
 }
 
@@ -338,6 +594,16 @@ struct GpuModel {
 
     float *rope_cache;
     float *h_rope;
+
+    /* prefill バッチ用（max_seq トークンまで） */
+    float *x_batch, *xb_batch, *xb2_batch;
+    float *q_batch, *k_batch, *v_batch;
+    float *hb_batch, *hb2_batch;
+    GpuBlockQ8_0 *q8_batch;
+    float *rope_batch;
+    float *h_rope_batch;
+    int *tokens_dev;
+    int batch_cap;
 };
 
 static DevBuf dev_upload(const void *host, size_t bytes)
@@ -422,6 +688,30 @@ static void gpu_mm(GpuModel *gm, float *o, const float *x, const void *W, int n,
     exit(1);
 }
 
+static void gpu_mm_q1_0_batch(GpuModel *gm, float *o, const float *x, const void *W,
+    int n, int d, int n_tokens)
+{
+    int nb = n / GPU_QK1_0;
+    int q8_nb = n / GPU_QK8_0;
+    size_t row_stride = (size_t)nb * sizeof(GpuBlockQ1_0);
+
+    quantize_q8_0_batch_kernel<<<n_tokens * q8_nb, 128>>>(
+        x, gm->q8_batch, q8_nb, n, n_tokens);
+    mm_q1_0_batch_kernel<<<(n_tokens * d + 255) / 256, 256>>>(
+        o, (const GpuBlockQ1_0 *)W, gm->q8_batch, d, nb, row_stride, n, n_tokens);
+}
+
+static void gpu_mm_batch(GpuModel *gm, float *o, const float *x, const void *W,
+    int n, int d, int type, int n_tokens)
+{
+    if (type == DT_Q1_0) {
+        gpu_mm_q1_0_batch(gm, o, x, W, n, d, n_tokens);
+        return;
+    }
+    fprintf(stderr, "gpu_mm_batch: unsupported type %d\n", type);
+    exit(1);
+}
+
 static void build_rope_cache_host(const GpuConfig *c, int pos, float *cache)
 {
     int n_rot = c->n_rot > 0 ? c->n_rot : c->head_dim;
@@ -460,6 +750,13 @@ static void build_rope_cache_host(const GpuConfig *c, int pos, float *cache)
         cache[i0 + 1] = sinf(theta) * ms;
         th *= theta_scale;
     }
+}
+
+static void build_rope_cache_batch_host(const GpuConfig *c, int n_tokens, float *cache)
+{
+    int n_rot = c->n_rot > 0 ? c->n_rot : c->head_dim;
+    for (int pos = 0; pos < n_tokens; pos++)
+        build_rope_cache_host(c, pos, cache + (size_t)pos * n_rot * 2);
 }
 
 GpuModel *gpu_model_create(const GpuConfig *cfg, const GpuWeightsHost *host)
@@ -532,6 +829,24 @@ GpuModel *gpu_model_create(const GpuConfig *cfg, const GpuWeightsHost *host)
     gm->h_rope = (float *)malloc((size_t)n_rot * 2 * sizeof(float));
     CUDA_CHECK(cudaMalloc(&gm->rope_cache, (size_t)n_rot * 2 * sizeof(float)));
 
+    gm->batch_cap = max_seq;
+    {
+        size_t bc = (size_t)max_seq;
+        CUDA_CHECK(cudaMalloc(&gm->x_batch,   bc * (size_t)dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->xb_batch,  bc * (size_t)dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->xb2_batch, bc * (size_t)dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->q_batch,   bc * (size_t)dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->k_batch,   bc * (size_t)kv_dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->v_batch,   bc * (size_t)kv_dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->hb_batch,  bc * (size_t)hidden * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->hb2_batch, bc * (size_t)hidden * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->q8_batch,
+            bc * (size_t)gm->q8_nb * sizeof(GpuBlockQ8_0)));
+        CUDA_CHECK(cudaMalloc(&gm->rope_batch, bc * (size_t)n_rot * 2 * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gm->tokens_dev, bc * sizeof(int)));
+        gm->h_rope_batch = (float *)malloc(bc * (size_t)n_rot * 2 * sizeof(float));
+    }
+
     CUDA_CHECK(cudaDeviceSynchronize());
     printf("GPU: weights uploaded (%d layers, dim=%d, vocab=%d)\n", L, dim, vocab);
     return gm;
@@ -564,6 +879,18 @@ void gpu_model_destroy(GpuModel *gm)
     cudaFree(gm->q8);
     cudaFree(gm->rope_cache);
     free(gm->h_rope);
+    cudaFree(gm->x_batch);
+    cudaFree(gm->xb_batch);
+    cudaFree(gm->xb2_batch);
+    cudaFree(gm->q_batch);
+    cudaFree(gm->k_batch);
+    cudaFree(gm->v_batch);
+    cudaFree(gm->hb_batch);
+    cudaFree(gm->hb2_batch);
+    cudaFree(gm->q8_batch);
+    cudaFree(gm->rope_batch);
+    cudaFree(gm->tokens_dev);
+    free(gm->h_rope_batch);
     free(gm);
 }
 
@@ -631,6 +958,86 @@ void gpu_forward(GpuModel *gm, int token, int pos)
     }
 
     rmsnorm_kernel<<<1, 256>>>(gm->x, gm->x, (float *)gm->norm_out.ptr, dim, c->norm_eps);
+    gpu_mm(gm, gm->logits, gm->x, gm->out.ptr, dim, c->vocab_size, gm->out_t);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void gpu_forward_prefill(GpuModel *gm, const int *tokens, int n_tokens)
+{
+    if (n_tokens <= 0) return;
+    if (n_tokens > gm->batch_cap) {
+        fprintf(stderr, "gpu_forward_prefill: n_tokens=%d exceeds batch_cap=%d\n",
+            n_tokens, gm->batch_cap);
+        exit(1);
+    }
+
+    GpuConfig *c = &gm->cfg;
+    int dim = c->dim, hd = c->head_dim, kv_dim = c->kv_dim;
+    int kv_mul = c->kv_mul, n_heads = c->n_heads, n_kv = c->n_kv_heads;
+    int max_seq = c->max_seq, hidden = c->hidden_dim;
+    int n_rot = c->n_rot > 0 ? c->n_rot : hd;
+    const float scale = 1.0f / sqrtf((float)hd);
+    const int nb = dim / GPU_QK1_0;
+
+    CUDA_CHECK(cudaMemcpy(gm->tokens_dev, tokens, (size_t)n_tokens * sizeof(int),
+        cudaMemcpyHostToDevice));
+
+    build_rope_cache_batch_host(c, n_tokens, gm->h_rope_batch);
+    CUDA_CHECK(cudaMemcpy(gm->rope_batch, gm->h_rope_batch,
+        (size_t)n_tokens * n_rot * 2 * sizeof(float), cudaMemcpyHostToDevice));
+
+    emb_q1_0_batch_kernel<<<dim3(nb, n_tokens, 1), 128>>>(
+        gm->x_batch, (const GpuBlockQ1_0 *)gm->embd.ptr, gm->tokens_dev, nb, dim, n_tokens);
+
+    for (int l = 0; l < c->n_layers; l++) {
+        rmsnorm_batch_kernel<<<n_tokens, 256>>>(
+            gm->xb_batch, gm->x_batch, (float *)gm->norm_att.layer[l], dim, n_tokens, c->norm_eps);
+
+        gpu_mm_batch(gm, gm->q_batch, gm->xb_batch, gm->wq.layer[l], dim, dim, gm->wq_t[l], n_tokens);
+        gpu_mm_batch(gm, gm->k_batch, gm->xb_batch, gm->wk.layer[l], dim, kv_dim, gm->wk_t[l], n_tokens);
+        gpu_mm_batch(gm, gm->v_batch, gm->xb_batch, gm->wv.layer[l], dim, kv_dim, gm->wv_t[l], n_tokens);
+
+        rmsnorm_head_batch_kernel<<<n_tokens * n_heads, 256>>>(
+            gm->q_batch, (float *)gm->q_norm.layer[l], n_heads, hd, n_tokens, c->norm_eps);
+        rmsnorm_head_batch_kernel<<<n_tokens * n_kv, 256>>>(
+            gm->k_batch, (float *)gm->k_norm.layer[l], n_kv, hd, n_tokens, c->norm_eps);
+
+        rope_neox_batch_kernel<<<n_tokens * n_heads, 128>>>(
+            gm->q_batch, gm->rope_batch, n_heads, hd, n_rot, n_tokens);
+        rope_neox_batch_kernel<<<n_tokens * n_kv, 128>>>(
+            gm->k_batch, gm->rope_batch, n_kv, hd, n_rot, n_tokens);
+
+        size_t loff = (size_t)l * max_seq * kv_dim;
+        kv_write_batch_kernel<<<n_tokens, 256>>>(
+            gm->kc + loff, gm->k_batch, kv_dim, n_tokens);
+        kv_write_batch_kernel<<<n_tokens, 256>>>(
+            gm->vc + loff, gm->v_batch, kv_dim, n_tokens);
+
+        flash_attn_prefill_gqa_kernel<<<n_tokens * n_heads, FA_HD>>>(
+            gm->xb_batch, gm->q_batch, gm->kc + loff, gm->vc + loff,
+            n_tokens, n_heads, hd, kv_dim, kv_mul, scale);
+
+        gpu_mm_batch(gm, gm->xb2_batch, gm->xb_batch, gm->wo.layer[l], dim, dim, gm->wo_t[l], n_tokens);
+        add_batch_kernel<<<(n_tokens * dim + 255) / 256, 256>>>(
+            gm->x_batch, gm->xb2_batch, dim, n_tokens);
+
+        rmsnorm_batch_kernel<<<n_tokens, 256>>>(
+            gm->xb_batch, gm->x_batch, (float *)gm->norm_ffn.layer[l], dim, n_tokens, c->norm_eps);
+
+        gpu_mm_batch(gm, gm->hb_batch,  gm->xb_batch, gm->gate.layer[l], dim, hidden, gm->gate_t[l], n_tokens);
+        gpu_mm_batch(gm, gm->hb2_batch, gm->xb_batch, gm->up.layer[l],   dim, hidden, gm->up_t[l], n_tokens);
+
+        swiglu_batch_kernel<<<(n_tokens * hidden + 255) / 256, 256>>>(
+            gm->hb_batch, gm->hb2_batch, hidden, n_tokens);
+
+        gpu_mm_batch(gm, gm->xb_batch, gm->hb_batch, gm->down.layer[l], hidden, dim, gm->down_t[l], n_tokens);
+        add_batch_kernel<<<(n_tokens * dim + 255) / 256, 256>>>(
+            gm->x_batch, gm->xb_batch, dim, n_tokens);
+    }
+
+    /* 最終 norm + LM head は末尾トークン（サンプリング用）のみ */
+    const float *x_last = gm->x_batch + (size_t)(n_tokens - 1) * dim;
+    rmsnorm_kernel<<<1, 256>>>(gm->x, x_last, (float *)gm->norm_out.ptr, dim, c->norm_eps);
     gpu_mm(gm, gm->logits, gm->x, gm->out.ptr, dim, c->vocab_size, gm->out_t);
     CUDA_CHECK(cudaDeviceSynchronize());
 }

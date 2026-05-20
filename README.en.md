@@ -14,7 +14,7 @@ Per [Announcing 1-bit Bonsai: The First Commercially Viable 1-bit LLMs](https://
 
 The primary path uses **standard C and `libm` only**, built from **`bonsai-8b/cpu/main.c`** into a **single-threaded CPU** binary (`bonsai-cpu`). For faster experimentation on multicore CPUs, **`bonsai-8b/cpu-omp/main.c`** builds **`bonsai-cpu-omp`**, parallelized with **OpenMP** (**standard C + `libm` + OpenMP runtime**).  
 For practical throughput on **`Bonsai-8B-Q1_0`**, **`bonsai-8b/cpu-blas/`** builds **`bonsai-cpu-blas`** with **OpenMP + OpenBLAS** and a **fused Q1_0 dot-product kernel** (**standard C + `libm` + OpenMP + OpenBLAS**).  
-For **NVIDIA GPUs**, **`bonsai-8b/gpu-cuda/`** (**`main.c`** + **`kernels.cu`** → **`bonsai-gpu-cuda`**) keeps weights and KV in VRAM and runs the forward pass with **CUDA kernels** (including Flash Attention), linking **CUDA Runtime only (`libcudart`)**. There is no Python or `torch` dependency.
+For **NVIDIA GPUs**, **`bonsai-8b/gpu-cuda/`** (**`main.c`** + **`kernels.cu`** → **`bonsai-gpu-cuda`**) keeps weights and KV in VRAM. **Prefill** runs the full prompt in parallel via **`gpu_forward_prefill`**; **decode** runs one token at a time via **`gpu_forward`** (Flash Attention with K/V shared-memory staging). Links **CUDA Runtime only (`libcudart`)**. There is no Python or `torch` dependency.
 
 ### Why avoid ML libraries?
 
@@ -76,7 +76,7 @@ Roughly:
 
 1. **Read the GGUF** — weights, vocabulary, hyperparameters.  
 2. **Tokenize** — map the prompt string to token IDs.  
-3. **Run the Transformer** one token at a time.  
+3. **Run the Transformer** — CPU builds go one token at a time; **`gpu-cuda`** batches **prefill**, then decodes one token at a time.  
 4. **Sample** the next token (`-t`, `-k`, …).  
 5. **Decode** tokens to text.
 
@@ -257,7 +257,14 @@ make run.cpu-blas PROMPT="Hello"
 
 ## Build & run (GPU + CUDA, `gpu-cuda`, NVIDIA recommended)
 
-Same GGUF and CLI as **`cpu-blas`**. Weights, KV cache, and activations are uploaded to **VRAM** at startup; the forward pass runs in **CUDA kernels**. **Q1_0 GEMV** uses Q8_0 activation plus a dedicated kernel; **attention** uses **Flash Attention–style online softmax** (no materialized `att` matrix). Sampling stays on the CPU (logits copied D2H).
+Same GGUF and CLI as **`cpu-blas`**. At startup, weights, KV cache, single-token activations, and **prefill batch buffers** (sized for **`-l` / `max_seq`**) are allocated in **VRAM**.
+
+- **Prefill** (prompt length ≥ 2): **`gpu_forward_prefill`** forwards all prompt positions in one batched pass (batch CUDA kernels + causal **`flash_attn_prefill_gqa_kernel`**).
+- **Decode**: one token per step with **`gpu_forward`** (**`flash_attn_gqa_kernel`**; Flash Attention with K/V staged in shared memory).
+- **Q1_0 GEMV**: Q8_0 activation plus dedicated kernels (single-token and batch paths).
+- **Sampling stays on the CPU** (logits copied D2H).
+
+During prefill, the progress bar shows **0% until the batch finishes**, then jumps to complete (unlike the per-token updates on CPU builds). Prompt length must be **≤ `-l` (`max_seq`)**.
 
 ### Build
 
@@ -325,9 +332,9 @@ Under these conditions, **`cpu-blas` was about 6× faster than `cpu-omp`** and *
 
 | Binary | Prefill tok/s | Decode time | Decode throughput | Notes |
 |---|---:|---:|---:|---|
-| `gpu-cuda/bonsai-gpu-cuda` | ~48 | 0.32 s | **50.24 tok/s** | Flash Attention |
+| `gpu-cuda/bonsai-gpu-cuda` | ~48 | 0.32 s | **50.24 tok/s** | Decode metric; prefill **~48 tok/s** is **pre–batch-prefill** reference |
 
-With the same prompt and `-t 0`, output matched **`cpu-blas`** (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`). `-ffast-math` / `-use_fast_math` can change FP reduction order vs CPU builds; output still matched in this run.
+With the same prompt and `-t 0`, output matched **`cpu-blas`** (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`). `-ffast-math` / `-use_fast_math` can change FP reduction order vs CPU builds; output still matched in this run. See `doc/design.md` for updated prefill benchmarks when re-measured.
 
 ## Common CLI options
 
@@ -416,7 +423,7 @@ Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-
 
 ### CUDA / `nvcc` not found (`gpu-cuda`)
 
-Install CUDA Toolkit (**`nvcc`**) and an NVIDIA driver, then rebuild in **`gpu-cuda`**. Older CUDA releases may not support `-arch=native`; the default builds PTX (`compute_86`) for driver JIT. Set **`CUDA_GENCODE`** for your GPU (see **`gpu-cuda/Makefile`**).
+Install CUDA Toolkit (**`nvcc`**) and an NVIDIA driver, then rebuild in **`gpu-cuda`**. Older CUDA releases may not support `-arch=native`; the default builds PTX (`compute_86`) for driver JIT. Set **`CUDA_GENCODE`** for your GPU (see **`gpu-cuda/Makefile`**). If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
 ## Reading the codebase
 
@@ -425,8 +432,9 @@ Install CUDA Toolkit (**`nvcc`**) and an NVIDIA driver, then rebuild in **`gpu-c
 3. `bonsai-8b/cpu/main.c` — GGUF load through one-token generation (single-thread baseline)  
 4. `bonsai-8b/cpu-omp/main.c` — OpenMP parallel variant  
 5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + fused Q1_0 kernel  
-6. `bonsai-8b/gpu-cuda/main.c` — host side (GGUF, tokenizer, sampling)  
-7. `bonsai-8b/gpu-cuda/kernels.cu` — CUDA kernels (Flash Attention, etc.)  
+6. `bonsai-8b/gpu-cuda/main.c` — host side (GGUF, tokenizer, **`generate`** with batched prefill / sequential decode, sampling)  
+7. `bonsai-8b/gpu-cuda/kernels.cu` — CUDA kernels (**`gpu_forward_prefill`** / **`gpu_forward`**, Flash Attention, etc.)  
+8. `bonsai-8b/gpu-cuda/gpu.h` — C API (**`gpu_forward_prefill`**, etc.)  
 
 ## Out of scope
 

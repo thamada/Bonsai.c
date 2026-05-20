@@ -14,7 +14,7 @@
 推論の基準経路は **標準Cと `libm`** のみで、`bonsai-8b/cpu/main.c` から **CPU 単スレッド**の実行ファイル（`bonsai-cpu`）をビルドします。  
 より速い検証向けに、同じ GGUF に対応した **OpenMP マルチスレッド**版を `bonsai-8b/cpu-omp/main.c` から **`bonsai-cpu-omp`** として別ビルドできます（ランタイムは **標準C + `libm` + OpenMP ランタイム**）。  
 さらに **`bonsai-8b/cpu-blas/`** では **OpenMP + OpenBLAS** と **Q1_0 専用の融合内積カーネル**で **`bonsai-cpu-blas`** をビルドできます（**標準C + `libm` + OpenMP + OpenBLAS**）。  
-**NVIDIA GPU** 向けには **`bonsai-8b/gpu-cuda/`**（**`main.c`** + **`kernels.cu`** → **`bonsai-gpu-cuda`**）があり、重みと KV を VRAM に載せ **CUDA カーネル**（Flash Attention 含む）で forward します（**CUDA Runtime のみ、`libcudart`**）。Python や `torch` には依存しません。
+**NVIDIA GPU** 向けには **`bonsai-8b/gpu-cuda/`**（**`main.c`** + **`kernels.cu`** → **`bonsai-gpu-cuda`**）があり、重みと KV を VRAM に載せ **CUDA カーネル**で forward します。**Prefill** はプロンプト全トークンを **`gpu_forward_prefill`** でバッチ並列、**Decode** は 1 トークンずつ **`gpu_forward`**（Flash Attention + K/V shared staging）。**CUDA Runtime のみ（`libcudart`）**。Python や `torch` には依存しません。
 
 ### なぜライブラリ非依存なのか
 
@@ -77,7 +77,7 @@
 
 1. **GGUF を読む**  
 2. **プロンプトをトークン化する**  
-3. **Transformer を 1 トークンずつ実行する**  
+3. **Transformer を実行する**（CPU 3 バリアントは 1 トークンずつ。**`gpu-cuda`** は prefill をバッチ、decode を 1 トークンずつ）  
 4. **サンプリングする**（`-t`、`-k` など）  
 5. **トークンを文字列に戻す**  
 
@@ -254,7 +254,14 @@ make run.cpu-blas PROMPT="Hello"
 
 ## GPU CUDA 版（`gpu-cuda`、NVIDIA GPU 推奨）
 
-`cpu-blas` と同じ GGUF・CLI を前提に、起動時に重み・KV・活性化を **VRAM** に載せ、**CUDA カーネル**で forward します。**Q1_0 GEMV** は Q8_0 活性化 + 専用カーネル、**Attention** は **Flash Attention 風 online softmax**（中間 `att` 行列を展開しない）。サンプリングのみ CPU（logits の D2H コピー）。
+`cpu-blas` と同じ GGUF・CLI を前提に、起動時に重み・KV・**prefill バッチ用活性化**（**`-l` の `max_seq` 分）**を **VRAM** に載せます。
+
+- **Prefill**（プロンプトが 2 トークン以上）: **`gpu_forward_prefill`** が全プロンプト位置を**一度に** forward（バッチ CUDA カーネル + 因果 **`flash_attn_prefill_gqa_kernel`**）。
+- **Decode**: 1 トークンずつ **`gpu_forward`**（**`flash_attn_gqa_kernel`**。K/V は shared memory に staging する Flash Attention）。
+- **Q1_0 GEMV**: Q8_0 活性化 + 専用カーネル（単トークン／バッチ両方）。
+- **サンプリングのみ CPU**（logits の D2H コピー）。
+
+Prefill 中のプログレスバーは **0% 表示のあと、バッチ完了時に一気に 100%** になります（CPU 版のトークン逐次更新とは異なります）。プロンプト長は **`-l`（`max_seq`）以下**である必要があります。
 
 ### ビルド
 
@@ -322,9 +329,9 @@ make run.gpu-cuda PROMPT="Hello"
 
 | バイナリ | prefill tok/s | decode 時間 | decode スループット | 備考 |
 |---|---:|---:|---:|---|
-| `gpu-cuda/bonsai-gpu-cuda` | ~48 | 0.32 s | **50.24 tok/s** | Flash Attention 実装 |
+| `gpu-cuda/bonsai-gpu-cuda` | ~48 | 0.32 s | **50.24 tok/s** | decode 指標。prefill **~48 tok/s** はバッチ prefill 導入**前**の参考値 |
 
-同一プロンプト・`-t 0` で **`cpu-blas` と同じ生成テキスト**（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）。`-ffast-math` / `-use_fast_math` により浮動小数の結合順は CPU 版と異なり得ますが、上記試行では同一出力でした。
+同一プロンプト・`-t 0` で **`cpu-blas` と同じ生成テキスト**（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）。`-ffast-math` / `-use_fast_math` により浮動小数の結合順は CPU 版と異なり得ますが、上記試行では同一出力でした。prefill の再計測は `doc/design.md` を参照してください。
 
 ## よく使うオプション
 
@@ -411,7 +418,7 @@ cd bonsai-8b && make model
 
 ### CUDA / `nvcc` が見つからない（`gpu-cuda`）
 
-CUDA Toolkit（**`nvcc`**）と NVIDIA ドライバをインストールし、`gpu-cuda` で `make build` を再実行してください。古い CUDA では `-arch=native` が使えないため、既定は PTX（`compute_86`）+ ドライバ JIT です。GPU に合わせ `CUDA_GENCODE` を指定してください（`gpu-cuda/Makefile` 参照）。
+CUDA Toolkit（**`nvcc`**）と NVIDIA ドライバをインストールし、`gpu-cuda` で `make build` を再実行してください。古い CUDA では `-arch=native` が使えないため、既定は PTX（`compute_86`）+ ドライバ JIT です。GPU に合わせ `CUDA_GENCODE` を指定してください（`gpu-cuda/Makefile` 参照）。プロンプトが `[prompt length … exceeds max_seq …]` で止まる場合は **`-l`** を大きくしてください。
 
 ## 実装を読みたい人へ
 
@@ -420,8 +427,9 @@ CUDA Toolkit（**`nvcc`**）と NVIDIA ドライバをインストールし、`g
 3. `bonsai-8b/cpu/main.c` — 単スレッド基準経路  
 4. `bonsai-8b/cpu-omp/main.c` — OpenMP 並列版  
 5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + Q1_0 融合カーネル  
-6. `bonsai-8b/gpu-cuda/main.c` — ホスト側（GGUF・トークナイザ・サンプリング）  
-7. `bonsai-8b/gpu-cuda/kernels.cu` — CUDA カーネル（Flash Attention 等）  
+6. `bonsai-8b/gpu-cuda/main.c` — ホスト側（GGUF・トークナイザ・**prefill バッチ / decode 逐次**の `generate`・サンプリング）  
+7. `bonsai-8b/gpu-cuda/kernels.cu` — CUDA カーネル（**`gpu_forward_prefill`** / **`gpu_forward`**、Flash Attention 等）  
+8. `bonsai-8b/gpu-cuda/gpu.h` — C API（**`gpu_forward_prefill`** 等）  
 
 ## このリポジトリで扱わないもの
 
