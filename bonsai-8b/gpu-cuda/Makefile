@@ -22,7 +22,14 @@ MODEL   ?= ../Bonsai-8B-Q1_0.gguf
 PROMPT  ?= Hello, how are you?
 
 BLACKWELL_GENCODE ?= arch=compute_120,code=sm_120
+BLACKWELL_FA_BR     ?= 32
 CUDA13_NVCC         ?= /usr/local/cuda/bin/nvcc
+
+# Blackwell (sm_120) は静的 shared 上限 48 KB。FA_BR=32 で Flash Attention が収まる。
+FA_BR_FLAG :=
+ifneq ($(FA_BR),)
+FA_BR_FLAG := -DFA_BR=$(FA_BR)
+endif
 
 .PHONY: build run clean blackwell run.blackwell
 
@@ -33,7 +40,7 @@ main.o: main.c gpu.h
 	$(CC) $(CFLAGS) -c main.c -o main.o
 
 kernels.o: kernels.cu gpu.h
-	$(NVCC) $(NVCCFLAGS) -c kernels.cu -o kernels.o
+	$(NVCC) $(NVCCFLAGS) $(FA_BR_FLAG) -c kernels.cu -o kernels.o
 
 run: build
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
@@ -89,8 +96,8 @@ blackwell:
 		exit 1; \
 	fi; \
 	echo "=== CUDA $$("$(CUDA13_NVCC)" --version | sed -n 's/.*release \([^,]*\).*/\1/p' | head -1) ready ==="; \
-	echo "=== Building for Blackwell ($(BLACKWELL_GENCODE)) ==="; \
-	$(MAKE) build CUDA_GENCODE="$(BLACKWELL_GENCODE)" NVCC="$(CUDA13_NVCC)"
+	echo "=== Building for Blackwell ($(BLACKWELL_GENCODE), FA_BR=$(BLACKWELL_FA_BR)) ==="; \
+	$(MAKE) build CUDA_GENCODE="$(BLACKWELL_GENCODE)" NVCC="$(CUDA13_NVCC)" FA_BR="$(BLACKWELL_FA_BR)"
 
 run.blackwell: blackwell
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"

@@ -72,7 +72,7 @@
 | 表の指標（prefill） | stderr の `Prefill complete` 行（**`gpu_forward_prefill`** バッチ、`-use_fast_math`） |
 | 表の指標（decode） | decode 時間・tok/s（stderr の `Decode complete` 行） |
 | ビルド | `gpu-cuda/Makefile` 既定（**`-gencode arch=compute_86,code=compute_86`** PTX、ドライバ JIT） |
-| Attention | **Flash Attention + K/V shared staging**（decode: **`flash_attn_gqa_kernel`** `<<<n_heads, FA_HD>>>` / prefill: **`flash_attn_prefill_gqa_kernel`** `<<<n_tokens×n_heads, FA_HD>>>`、因果マスク、shared ≈ 65 KB、carveout=100） |
+| Attention | **Flash Attention + K/V shared staging**（decode: **`flash_attn_gqa_kernel`** `<<<n_heads, FA_HD>>>` / prefill: **`flash_attn_prefill_gqa_kernel`** `<<<n_tokens×n_heads, FA_HD>>>`、因果マスク。既定 **`FA_BR=64`** → shared ≈ 65 KB + carveout=100。**Blackwell ネイティブ（`sm_120`）** は **`FA_BR=32`**（≈34 KB、静的 shared 上限 48 KB 以内）） |
 
 | バイナリ | prefill tok/s | decode 時間 | decode スループット |
 |----------|-------------:|----------:|-----------------:|
@@ -95,7 +95,7 @@
 | `bonsai-8b/gpu-cuda/main.c` | **`cpu-blas` をベースに CPU 演算を GPU API 呼び出しへ置換したホスト側**（GGUF 読み込み・トークナイザ・サンプリングは CPU）。**`gpu.h`** の C API 経由で **`kernels.cu`** を呼ぶ。 |
 | `bonsai-8b/gpu-cuda/kernels.cu` | **CUDA カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、単トークン／**バッチ** Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`** 等）。 |
 | `bonsai-8b/gpu-cuda/gpu.h` | **`GpuModel`** / **`gpu_model_create`** / **`gpu_forward`** / **`gpu_forward_prefill`** / **`gpu_copy_logits`** 等の C API（**`extern "C"`**）。 |
-| `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成（**`main.c`** → **`cc`**、**`kernels.cu`** → **`nvcc`**、リンクも **`nvcc`**。**`-lcudart`**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`** PTX、**`-use_fast_math`**）。**`blackwell`** / **`run.blackwell`**: apt **CUDA 11** 削除 → NVIDIA 公式 **`cuda-toolkit-13`** インストール → **`BLACKWELL_GENCODE=arch=compute_120,code=sm_120`** でビルド（要 **sudo**）。 |
+| `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成（**`main.c`** → **`cc`**、**`kernels.cu`** → **`nvcc`**、リンクも **`nvcc`**。**`-lcudart`**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`** PTX、**`-use_fast_math`**）。**`blackwell`** / **`run.blackwell`**: apt **CUDA 11** 削除 → NVIDIA 公式 **`cuda-toolkit-13`** インストール → **`BLACKWELL_GENCODE=arch=compute_120,code=sm_120`** + **`BLACKWELL_FA_BR=32`**（**`-DFA_BR=32`**）でビルド（要 **sudo**）。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL（`blob/main` 形式）。 |
 | `bonsai-8b/Bonsai-8B-Q1_0.gguf.sha256sum` | 既定 GGUF の SHA256 チェックサム（`make model` の検証に使用）。 |
 | `doc/design.md` | 本書。 |
@@ -110,7 +110,7 @@
 | `build.cpu` / `run.cpu` | `cpu/bonsai-cpu` | `cpu/main.c` |
 | `build.cpu-blas` / `run.cpu-blas` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
 | `build.gpu-cuda` / `run.gpu-cuda` | `gpu-cuda/bonsai-gpu-cuda` | `gpu-cuda/main.c` + `gpu-cuda/kernels.cu` |
-| `blackwell` / `build.blackwell` / `run.blackwell` | `gpu-cuda/bonsai-gpu-cuda`（Blackwell 向け **`sm_120`**） | `gpu-cuda/Makefile` の **`blackwell`**（CUDA 13 セットアップ＋ビルド） |
+| `blackwell` / `build.blackwell` / `run.blackwell` | `gpu-cuda/bonsai-gpu-cuda`（Blackwell 向け **`sm_120`**、**`FA_BR=32`**） | `gpu-cuda/Makefile` の **`blackwell`**（CUDA 13 セットアップ＋ビルド） |
 
 **`cpu-omp/`** はルート Makefile からは呼ばず、次のようにサブディレクトリでビルドする。
 
@@ -168,7 +168,7 @@ Blackwell GPU 版（RTX 50 系等。CUDA 13 必須）:
 
 ```bash
 cd bonsai-8b
-make blackwell          # apt CUDA 11 削除 → CUDA 13 インストール → sm_120 ビルド（要 sudo）
+make blackwell          # apt CUDA 11 削除 → CUDA 13 インストール → sm_120 + FA_BR=32 ビルド（要 sudo）
 make run.blackwell      # 上記ビルド後に推論実行
 # または gpu-cuda/ で make blackwell / make run.blackwell
 ```
@@ -213,7 +213,9 @@ make build
 
 1. apt の **CUDA 11** 系パッケージ（**`nvidia-cuda-toolkit`** 等）を **`apt-get remove --purge`**
 2. NVIDIA 公式リポジトリ（**`cuda-keyring`**）を追加し **`cuda-toolkit-13`** をインストール（**`/usr/local/cuda/bin/nvcc`**）
-3. **`BLACKWELL_GENCODE=arch=compute_120,code=sm_120`** で **`bonsai-gpu-cuda`** をビルド
+3. **`BLACKWELL_GENCODE=arch=compute_120,code=sm_120`** と **`BLACKWELL_FA_BR=32`**（**`-DFA_BR=32`**）で **`bonsai-gpu-cuda`** をビルド
+
+**Blackwell の Flash Attention 制約**: **sm_120** は静的 shared memory 上限 **48 KB**。既定 **`FA_BR=64`**（K/V タイル ≈65 KB）は **`ptxas`** で拒否されるため、**`make blackwell`** は **`FA_BR=32`**（≈34 KB）を自動指定する。手動ビルド例: `make build CUDA_GENCODE=arch=compute_120,code=sm_120 FA_BR=32 NVCC=/usr/local/cuda/bin/nvcc`。
 
 対応 OS: Ubuntu 20.04 / 22.04 / 24.04、Debian 12 / 13。ルート **`bonsai-8b/Makefile`** の **`make blackwell`** / **`make run.blackwell`** も **`gpu-cuda/Makefile`** へ委譲する。
 
@@ -262,11 +264,11 @@ make build
 
 **`gpu-cuda`** は **`cpu-blas`** と同一の GGUF 読み込み・**`chat_encode`**・RoPE パラメータ・CLI を持つ。差分は forward の実行先・メモリ配置・**prefill / decode の経路分割**である。
 
-1. **起動時**: **`gpu_print_device_info()`** で GPU 名等を表示。**`gpu_model_create`** 内で **`flash_attn_init_once()`** が **`flash_attn_gqa_kernel`** と **`flash_attn_prefill_gqa_kernel`** の双方に **`cudaFuncAttributePreferredSharedMemoryCarveout=100`** を設定（shared ≈ 65 KB/ブロック）。GGUF を mmap したうえで重み・norm・KV キャッシュを VRAM へアップロード。加えて **prefill バッチ用**に **`x_batch` / `xb_batch` / `q_batch` …**（いずれも **`batch_cap = max_seq`** トークン分）と **`tokens_dev`**・**`q8_batch`**・**`rope_batch`** を **`cudaMalloc`**。**`GpuModel`**（**`gpu.h`**）がデバイス側ポインタを保持（推論中も mmap は保持し、終了時に **`munmap`**）。
+1. **起動時**: **`gpu_print_device_info()`** で GPU 名等を表示。**`gpu_model_create`** 内で **`flash_attn_init_once()`** が **`flash_attn_gqa_kernel`** と **`flash_attn_prefill_gqa_kernel`** の双方に **`cudaFuncAttributePreferredSharedMemoryCarveout=100`** を設定（**`FA_BR=64`** 時 shared ≈ 65 KB/ブロック。Ampere/Ada + PTX JIT 向け）。GGUF を mmap したうえで重み・norm・KV キャッシュを VRAM へアップロード。加えて **prefill バッチ用**に **`x_batch` / `xb_batch` / `q_batch` …**（いずれも **`batch_cap = max_seq`** トークン分）と **`tokens_dev`**・**`q8_batch`**・**`rope_batch`** を **`cudaMalloc`**。**`GpuModel`**（**`gpu.h`**）がデバイス側ポインタを保持（推論中も mmap は保持し、終了時に **`munmap`**）。
 2. **Prefill**（**`generate()`**、`n_prompt > 1`）: プロンプト ID 配列を **`gpu_forward_prefill(gm, tokens, n_tokens)`** に渡し、全プロンプト位置を**一度に** forward。各層で **`emb_q1_0_batch`**・**`rmsnorm_batch`** / **`rmsnorm_head_batch`**・**`rope_neox_batch`**・**`gpu_mm_batch`**（Q8_0 量子化 + Q1_0 GEMV のバッチ版）・**`kv_write_batch`**・**`flash_attn_prefill_gqa_kernel`** `<<<n_tokens × n_heads, FA_HD>>>`（位置 **`t`** は K/V の **`0..t`** のみ参照する因果 Attention）・**`swiglu_batch`** / **`add_batch`** を実行。最終 norm + LM head は**末尾トークン**（**`n_tokens - 1`**）のみ **`rmsnorm_kernel`** + **`gpu_mm`** で logits を得る。**`n_prompt == 1`** のときは従来どおり 1 トークン **`gpu_forward`**。
 3. **Decode**: 末尾 logits からサンプリングした次トークンを、位置 **`n_prompt + gen_i`** で **1 トークンずつ `gpu_forward`**（teacher forcing なし）。各ステップで **`flash_attn_gqa_kernel`** `<<<n_heads, FA_HD>>>`（デコード用 Flash Attention + K/V staging）。
 4. **Q1_0 GEMV**: 単トークン経路は **`quantize_q8_0_kernel` + `mm_q1_0_kernel`**、prefill バッチ経路は **`quantize_q8_0_batch_kernel` + `mm_q1_0_batch_kernel`**（いずれも **`cpu-blas`** 準拠ロジック）。
-5. **Attention（共通）**: シーケンス方向 **`FA_BR=64`** タイル、K/V を **`k_tile` / `v_tile`**（shared）へ staging、**online softmax**（**`fa_sh_reduce_max` / `fa_sh_reduce_sum`**）、**`att` 非物質化**、GQA 対応。
+5. **Attention（共通）**: シーケンス方向 **`FA_BR`** タイル（**`-DFA_BR`** で上書き可。既定 **64**、Blackwell ビルド **32**）、K/V を **`k_tile` / `v_tile`**（shared）へ staging、**online softmax**（**`fa_sh_reduce_max` / `fa_sh_reduce_sum`**）、**`att` 非物質化**、GQA 対応。
 6. **サンプリング**: prefill 直後および各 decode ステップ後に **`gpu_copy_logits`** で logits を D2H し、CPU で温度・top-p サンプリング（CPU バリアントと同ロジック）。
 
 #### VRAM 配置（`gpu_model_create`、README 付録と同内容）
@@ -342,7 +344,7 @@ LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の De
 - **`cpu`**: **`dot_q1_0_row`** / **`mm_q1_0_rows`** で融合行内積（`ggml-quants.c` の dequantize + 内積と同等、中間 FP32 ブロックなし）。
 - **`cpu-omp`**: 同上。行ループを **`#pragma omp parallel for`** で並列化。
 - **`cpu-blas`**: **`quantize_row_q8_0`** + **`vec_dot_q1_0_q8_0`**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠。AVX2 で SIMD、非 AVX2 は generic 参照）。**`State`** に **`BlockQ8_0 *q8`** を確保（`max(dim, hidden_dim) / QK8_0` ブロック）。
-- **`gpu-cuda`**: デバイス上で **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**（単トークン + **`*_batch`** 版）。Attention は decode **`flash_attn_gqa_kernel`** / prefill **`flash_attn_prefill_gqa_kernel`**（K/V shared staging、起動時 **`flash_attn_init_once`**）。
+- **`gpu-cuda`**: デバイス上で **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**（単トークン + **`*_batch`** 版）。Attention は decode **`flash_attn_gqa_kernel`** / prefill **`flash_attn_prefill_gqa_kernel`**（K/V shared staging、**`FA_BR`** タイル、起動時 **`flash_attn_init_once`**）。
 
 ### RoPE
 
@@ -368,7 +370,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（参考 decode **30.79 tok/s**）を推奨。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。
-- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s**（バッチ prefill）、decode **~50 tok/s**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**（PTX + ドライバ JIT）。**Blackwell（RTX 50 系）** は **CUDA 13 以降**と **`sm_120`** ネイティブコードが必要 — apt の **`nvidia-cuda-toolkit`（CUDA 11）** では不可。**`make blackwell`**（要 **sudo**）で CUDA 11 削除・**`cuda-toolkit-13`** インストール・Blackwell 向けビルドを一括実行。**VRAM** に prefill バッチ（**`max_seq` 分**）含む。**Flash Attention** shared ≈ 65 KB/ブロック・**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
+- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s**（バッチ prefill）、decode **~50 tok/s**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**（PTX + ドライバ JIT）。**Blackwell（RTX 50 系）** は **CUDA 13 以降**と **`sm_120`** ネイティブコードが必要 — apt の **`nvidia-cuda-toolkit`（CUDA 11）** では不可。**`make blackwell`**（要 **sudo**）で CUDA 11 削除・**`cuda-toolkit-13`** インストール・**`FA_BR=32`** 付き Blackwell 向けビルドを一括実行（**sm_120** の静的 shared 上限 **48 KB**；**`FA_BR=64`** はコンパイル不可）。**VRAM** に prefill バッチ（**`max_seq` 分**）含む。**Flash Attention** shared は **`FA_BR`** に依存（64 → ≈65 KB、32 → ≈34 KB）・**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。

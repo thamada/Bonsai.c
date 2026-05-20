@@ -20,8 +20,12 @@
 #define DT_Q1_0 41
 
 /* Flash Attention: K/V タイルを shared memory に staging（head_dim=128 固定）。
- * shared ≈ 2×FA_BR×FA_HD + q/o/scores/red ≈ 65 KB → carveout opt-in で 48 KB 超を許可。 */
+ * shared ≈ 2×FA_BR×FA_HD + q/o/scores/red。
+ * FA_BR=64 → ≈65 KB（Ampere/Ada は carveout で 48 KB 超可）。
+ * FA_BR=32 → ≈34 KB（Blackwell sm_120 の静的 shared 上限 48 KB 以内）。 */
+#ifndef FA_BR
 #define FA_BR  64
+#endif
 #define FA_HD  128   /* Bonsai-8B head_dim */
 
 static __device__ float fa_sh_reduce_max(float val, float *red_sh)

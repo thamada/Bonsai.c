@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 05:23:25
+
+**`bonsai-8b/gpu-cuda/kernels.cu`**: Flash Attention の **`FA_BR`** を **`#ifndef FA_BR`** で上書き可能に。Blackwell（**sm_120**）は静的 shared 上限 **48 KB** のため **`FA_BR=64`**（≈65 KB）では **`ptxas`** が失敗する。
+
+**`bonsai-8b/gpu-cuda/Makefile`**: **`make blackwell`** 時に **`BLACKWELL_FA_BR=32`**（≈34 KB）を **`-DFA_BR=32`** で渡す。**`FA_BR_FLAG`** / **`FA_BR`** 変数を追加。
+
+**`doc/design.md`**: Blackwell の shared 制約・**`FA_BR=32`**・ビルド手順を追記。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 05:19:44
 
 **`bonsai-8b/gpu-cuda/Makefile`**: **`blackwell`** / **`run.blackwell`** ターゲットを追加。apt の **CUDA 11** 系パッケージ（**`nvidia-cuda-toolkit`** 等）を削除し、NVIDIA 公式リポジトリから **`cuda-toolkit-13`** をインストールしたうえで **`arch=compute_120,code=sm_120`**（**`BLACKWELL_GENCODE`**）向けに **`bonsai-gpu-cuda`** をビルドする（要 **sudo**）。**`CUDA13_NVCC`** 既定 **`/usr/local/cuda/bin/nvcc`**。
