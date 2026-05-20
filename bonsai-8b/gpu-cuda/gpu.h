@@ -2,6 +2,7 @@
 #define BONSAI_GPU_H
 
 #include <stdint.h>
+#include "turboquant.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,12 +23,18 @@ typedef struct {
 } GpuBlockQ8_0;
 #pragma pack(pop)
 
+/* TurboQuant KV: polar_bits (2–4) + 1-bit QJL per head_dim coordinate */
+#define GPU_TQ_DIM         128
+#define GPU_TQ_POLAR_BITS  2
+#define GPU_TQ_ENTRY_BYTES (TQ_ENTRY_BYTES(GPU_TQ_DIM, GPU_TQ_POLAR_BITS))
+
 typedef struct {
     int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq;
     int head_dim, kv_dim, kv_mul, n_rot, n_ctx_orig_yarn;
     float norm_eps, rope_theta;
     float rope_freq_scale, yarn_ext_factor, yarn_attn_factor;
     float yarn_beta_fast, yarn_beta_slow;
+    int turboquant_kv; /* 1 = PolarQuant+QJL KV cache (default), 0 = F32 KV */
 } GpuConfig;
 
 typedef struct {

@@ -12,6 +12,7 @@
  *   - Decode: 1 トークンずつ gpu_forward。
  *   - Q1_0 GEMV: 活性化 Q8_0 化 + vec_dot_q1_0_q8_0 CUDA カーネル。
  *   - Attention: Flash Attention（online softmax、att 行列非物質化、GQA 対応）。
+ *   - KV キャッシュ: TurboQuant（PolarQuant + QJL、ICLR 2026 / arXiv:2504.19874）。
  *   - サンプリングのみ CPU（logits を D2H コピー）。
  * チャット: GGUF tokenizer.chat_template（Qwen3）の user + 空 think ブロック付き assistant 開始。
  */
@@ -1327,6 +1328,7 @@ static GpuConfig gpu_config_from(const Config *c) {
     g.yarn_attn_factor = c->yarn_attn_factor;
     g.yarn_beta_fast = c->yarn_beta_fast;
     g.yarn_beta_slow = c->yarn_beta_slow;
+    g.turboquant_kv = 1;
     return g;
 }
 
@@ -1580,6 +1582,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  -k <topp>     Top-p sampling (default: 0.9)\n");
         fprintf(stderr, "  -s <seed>     Random seed (default: time)\n");
         fprintf(stderr, "  -l <len>      Max sequence length (default: 512)\n");
+        fprintf(stderr, "  --no-tq       Disable TurboQuant KV cache (use F32 KV)\n");
         return 1;
     }
 
@@ -1590,14 +1593,21 @@ int main(int argc, char *argv[]) {
     float topp       = 0.9f;
     uint64_t seed    = (uint64_t)time(NULL);
     int   max_seq    = 512;
+    int   turboquant_kv = 1;
 
-    for (int i = 2; i + 1 < argc; i += 2) {
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--no-tq")) {
+            turboquant_kv = 0;
+            continue;
+        }
+        if (i + 1 >= argc) break;
         if      (!strcmp(argv[i], "-p")) prompt     = argv[i + 1];
         else if (!strcmp(argv[i], "-n")) max_tokens = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "-t")) temp       = (float)atof(argv[i + 1]);
         else if (!strcmp(argv[i], "-k")) topp       = (float)atof(argv[i + 1]);
         else if (!strcmp(argv[i], "-s")) seed       = (uint64_t)strtoull(argv[i + 1], NULL, 10);
         else if (!strcmp(argv[i], "-l")) max_seq    = atoi(argv[i + 1]);
+        i++;
     }
 
     /*
@@ -1643,8 +1653,12 @@ int main(int argc, char *argv[]) {
     alloc_state(&model.s, c);
 
     GpuConfig gc = gpu_config_from(c);
+    gc.turboquant_kv = turboquant_kv;
     GpuWeightsHost gw = gpu_weights_from(&model.w);
     model.gpu = gpu_model_create(&gc, &gw);
+    if (turboquant_kv)
+        printf("KV cache: TurboQuant (PolarQuant %d-bit + QJL, head_dim=%d)\n",
+               GPU_TQ_POLAR_BITS, GPU_TQ_DIM);
 
     int n_prompt_tokens;
     int *prompt_tokens = chat_encode(&model.tok, prompt, &n_prompt_tokens);

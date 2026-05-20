@@ -20,17 +20,20 @@ PROMPT  ?= Hello, how are you?
 
 .PHONY: build run clean
 
-build: main.o kernels.o
-	$(NVCC) $(NVCCFLAGS) -o bonsai-gpu-cuda main.o kernels.o $(LDFLAGS)
+build: main.o kernels.o turboquant.o
+	$(NVCC) $(NVCCFLAGS) -o bonsai-gpu-cuda main.o kernels.o turboquant.o $(LDFLAGS)
 
-main.o: main.c gpu.h
+main.o: main.c gpu.h turboquant.h
 	$(CC) $(CFLAGS) -c main.c -o main.o
 
-kernels.o: kernels.cu gpu.h
+kernels.o: kernels.cu gpu.h turboquant.h
 	$(NVCC) $(NVCCFLAGS) -c kernels.cu -o kernels.o
+
+turboquant.o: turboquant.c turboquant.h
+	$(CC) $(CFLAGS) -c turboquant.c -o turboquant.o
 
 run: build
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
 
 clean:
-	rm -f bonsai-gpu-cuda main.o kernels.o
+	rm -f bonsai-gpu-cuda main.o kernels.o turboquant.o
