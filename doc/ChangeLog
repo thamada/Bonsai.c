@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 04:37:58
+
+**`bonsai-8b/gpu-cuda/`**（**`polarquant` ブランチ**）: **TurboQuant を撤去**し **PolarQuant のみ**に再実装 — **QJL**・**`kc_win`/`vc_win`/`win_pos` リング**・**`TQ_F32_MIRROR`** を削除。**`polarquant.c`/`polarquant.h`**（**`polarquant_tables_create`**、**`polarquant_compress`**）。K/V 各 **32 B/head**（**Pi** + 2-bit Lloyd-Max）。Attention は **pack のみ**（**`dev_pq_kv_offset`** で全系列 **`pos`** 参照）。CLI **`--polarquant`**（**`GpuConfig.polarquant_kv`**）。**`kv_pq_compress_*`**、**`dev_pq_score_key`**（**`q_rot·centroid`**）、**`dev_pq_load_v_tile`**。
+
+**`doc/design.md`**: 上記（ファイル構成・VRAM 表・実行挙動・CLI・量子化節・制約、TurboQuant 環境変数節の削除）を PolarQuant に全面更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 04:24:09
 
 **`bonsai-8b/gpu-cuda/kernels.cu`**: 長文品質崩れの主因だった **F32 リングのスロットエイリアス**を修正 — **`kc_win_pos`/`vc_win_pos`**（`win_pos[slot]=pos`）と **`dev_tq_win_hit`** でタグ一致時のみ F32 K/V を参照。**`FA_BR` を 32→64** に拡大。pack 区間の K スコアを **`dev_tq_score_key`**（**`Pi^T·centroid`** と **`q`** の dot + QJL）に変更。**`kv_write_ring_*`** がタグを更新。**`flash_attn_*`** に win_pos 引数を追加。

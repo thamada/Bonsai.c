@@ -2,7 +2,7 @@
 #define BONSAI_GPU_H
 
 #include <stdint.h>
-#include "turboquant.h"
+#include "polarquant.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,13 +23,9 @@ typedef struct {
 } GpuBlockQ8_0;
 #pragma pack(pop)
 
-/* TurboQuant KV: polar_bits (2–4) + 1-bit QJL per head_dim coordinate */
-#define GPU_TQ_DIM         128
-#define GPU_TQ_POLAR_BITS  2
-/* K: PolarQuant 2-bit + QJL 1-bit/座標 (inner product)。V: PolarQuant のみ (MSE, 論文通り QJL なし) */
-#define GPU_TQ_K_ENTRY_BYTES (TQ_ENTRY_BYTES(GPU_TQ_DIM, GPU_TQ_POLAR_BITS))
-#define GPU_TQ_V_ENTRY_BYTES (TQ_INDICES_BYTES(GPU_TQ_DIM, GPU_TQ_POLAR_BITS))
-#define GPU_TQ_ENTRY_BYTES   GPU_TQ_K_ENTRY_BYTES /* 後方互換 */
+#define GPU_PQ_DIM         128
+#define GPU_PQ_POLAR_BITS  2
+#define GPU_PQ_ENTRY_BYTES PQ_ENTRY_BYTES(GPU_PQ_DIM, GPU_PQ_POLAR_BITS)
 
 typedef struct {
     int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq;
@@ -37,7 +33,7 @@ typedef struct {
     float norm_eps, rope_theta;
     float rope_freq_scale, yarn_ext_factor, yarn_attn_factor;
     float yarn_beta_fast, yarn_beta_slow;
-    int turboquant_kv; /* 1 = PolarQuant+QJL KV cache (--turboquant), 0 = F32 KV (default) */
+    int polarquant_kv; /* 1 = PolarQuant pack KV (--polarquant), 0 = F32 KV (default) */
 } GpuConfig;
 
 typedef struct {
