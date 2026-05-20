@@ -60,15 +60,15 @@
 | パス | 役割 |
 |------|------|
 | `README.md` / `README.en.md` | ビルド・実行・方針（日／英）。 |
-| `bonsai-8b/Makefile` | **`build.cpu`** / **`run.cpu`**、**`build.cpu-blas`** / **`run.cpu-blas`**、**`clean`**（`cpu`・`cpu-blas` を委譲）。**`cpu-omp` は未集約**（サブディレクトリの Makefile を直接使用）。 |
+| `bonsai-8b/Makefile` | **`model`**（GGUF ダウンロード＋SHA256 検証）、**`build.cpu`** / **`run.cpu`**、**`build.cpu-blas`** / **`run.cpu-blas`**、**`clean`**（`cpu`・`cpu-blas` を委譲）。**`cpu-omp` は未集約**（サブディレクトリの Makefile を直接使用）。 |
 | `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-omp/Makefile` | **`bonsai-cpu-omp`** の生成（`-fopenmp`）。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、`-march=native -funroll-loops -ffast-math -mfma` 等）。`pkg-config openblas` があれば `-I`/`-L` を自動付与。 |
 | `bonsai-8b/cpu/main.c` | CPU 単スレッド推論の**参照ソース**（アルゴリズムの正として追う）。**単一 `main.c`**（標準 C + `libm` のみ）。 |
 | `bonsai-8b/cpu-omp/main.c` | **`cpu/main.c` をベースに OpenMP を付与した派生**（挙動確認はまず `cpu` を正とする）。**単一 `main.c`**（+ OpenMP）。 |
 | `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。**単一 `main.c`**（+ OpenMP + OpenBLAS）。 |
-| `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL。 |
-| `bonsai-8b/hf-model.py` | （任意）`hf` CLI でダウンロード＋Hub LFS 検証。 |
+| `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL（`blob/main` 形式）。 |
+| `bonsai-8b/Bonsai-8B-Q1_0.gguf.sha256sum` | 既定 GGUF の SHA256 チェックサム（`make model` の検証に使用）。 |
 | `doc/design.md` | 本書。 |
 | `doc/ChangeLog` | 変更履歴。 |
 | `.gitignore` | ビルド生成物（**`bonsai-8b/cpu/bonsai-cpu`**、**`bonsai-8b/cpu-omp/bonsai-cpu-omp`**、**`bonsai-8b/cpu-blas/bonsai-cpu-blas`** 等）、`*.gguf` 等。 |
@@ -77,6 +77,7 @@
 
 | ターゲット | 出力 | ソース |
 |------------|------|--------|
+| `model` | `$(MODEL)`（既定 **`Bonsai-8B-Q1_0.gguf`**） | `gguf.txt` の URL を `resolve/main` に変換して `wget` し、**`$(MODEL).sha256sum`** で `sha256sum --check` |
 | `build.cpu` / `run.cpu` | `cpu/bonsai-cpu` | `cpu/main.c` |
 | `build.cpu-blas` / `run.cpu-blas` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
 
@@ -98,6 +99,7 @@
 
 ```bash
 cd bonsai-8b
+make model
 make build.cpu
 make run.cpu PROMPT="試す文" MODEL=./Bonsai-8B-Q1_0.gguf
 ```
@@ -243,8 +245,9 @@ GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_enc
 ## モデル参照
 
 - 既定ファイル名: **`bonsai-8b/Makefile` の `MODEL`**（既定 **`Bonsai-8B-Q1_0.gguf`**）。
-- 取得 URL: **`bonsai-8b/gguf.txt`**。
-- 手動検証: Hugging Face 上のハッシュと `sha256sum` 等で照合。
+- 取得 URL: **`bonsai-8b/gguf.txt`**（Hugging Face の `blob/main` URL。`make model` は `resolve/main` に置換して `wget` する）。
+- チェックサム: **`bonsai-8b/$(MODEL).sha256sum`**（既定 **`Bonsai-8B-Q1_0.gguf.sha256sum`**）。`make model` はダウンロード後に **`sha256sum --check`** で照合し、失敗時は破損ファイルを削除してエラーメッセージを表示する。
+- 手動取得: README の手順どおり `gguf.txt` から URL を変換して `wget` し、同 `.sha256sum` で検証してもよい。
 
 ## 制約・既知の制限
 

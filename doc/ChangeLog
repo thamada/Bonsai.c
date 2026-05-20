@@ -4,6 +4,18 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-20 23:37:59
+
+**`bonsai-8b/Makefile`**: **`model`** ターゲットを追加。**`gguf.txt`** の Hugging Face URL を **`blob/main` → `resolve/main`** に変換して **`wget`** し、**`$(MODEL).sha256sum`**（既定 **`Bonsai-8B-Q1_0.gguf.sha256sum`**）で **`sha256sum --check`** する。検証成功・失敗それぞれに日本語メッセージを表示し、失敗時は破損した **`$(MODEL)`** を削除する。
+
+**`bonsai-8b/Bonsai-8B-Q1_0.gguf.sha256sum`**: 既定 GGUF の SHA256 チェックサムをリポジトリに追加。
+
+**削除**: **`bonsai-8b/hf-model.py`**（`hf` CLI によるダウンロード＋Hub LFS 検証）。モデル取得は **`make model`** に一本化。
+
+**`doc/design.md`**: ディレクトリ表・Make ターゲット表・ビルド例・**「モデル参照」** から **`hf-model.py`** を除去し、**`model`** ターゲットと **`.sha256sum`** を反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-19 17:22:35
 
 **ドキュメント**: **`README.md`** / **`README.en.md`** / **`doc/design.md`** — 参考ベンチマークを再計測して更新（AMD Ryzen 9 5950X・32 論理コア・Linux・`Bonsai-8B-Q1_0.gguf`・`-p "Hello" -n 16 -t 0`・`OMP_NUM_THREADS=32`・`OPENBLAS_NUM_THREADS=1`（`cpu-blas` のみ）・GGUF pre-read in RAM・各バイナリ 1 回ウォームアップ後 3 回の最高 decode tok/s）。**`bonsai-cpu`** decode 66.8 s（**0.24 tok/s**）、**`bonsai-cpu-omp`** 3.2 s（**4.94 tok/s**）、**`bonsai-cpu-blas`** 0.5 s（**30.79 tok/s**、`cpu-omp` の約 6 倍・`cpu` の約 128 倍）。3 バイナリの生成テキスト一致を記載。
