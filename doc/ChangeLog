@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 05:19:44
+
+**`bonsai-8b/gpu-cuda/Makefile`**: **`blackwell`** / **`run.blackwell`** ターゲットを追加。apt の **CUDA 11** 系パッケージ（**`nvidia-cuda-toolkit`** 等）を削除し、NVIDIA 公式リポジトリから **`cuda-toolkit-13`** をインストールしたうえで **`arch=compute_120,code=sm_120`**（**`BLACKWELL_GENCODE`**）向けに **`bonsai-gpu-cuda`** をビルドする（要 **sudo**）。**`CUDA13_NVCC`** 既定 **`/usr/local/cuda/bin/nvcc`**。
+
+**`bonsai-8b/Makefile`**: **`blackwell`** / **`build.blackwell`** / **`run.blackwell`** を追加（**`gpu-cuda/Makefile`** の **`blackwell`** へ委譲）。
+
+**`doc/design.md`**: ディレクトリ表・Make ターゲット表・GPU ビルド手順・制約に **Blackwell / CUDA 13 / `make blackwell`** を追記。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 02:16:39
 
 **`README.md` / `README.en.md`**: GPU 参考ベンチマーク表の prefill を **~294 tok/s**（RTX 5090・バッチ prefill・`-p "Hello" -n 16 -t 0` 実測）に更新。旧 **~48 tok/s**（逐次 prefill 時代の参考値）と備考列を削除。

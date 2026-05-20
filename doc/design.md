@@ -85,7 +85,7 @@
 | パス | 役割 |
 |------|------|
 | `README.md` / `README.en.md` | **入口（日／英）**。**本文**: CPU 3 バリアントのビルド・実行・ベンチマーク・トラブルシュート（`make model` 含む）。**付録**（`---` 以降）: **`gpu-cuda`** の位置づけ・技術メモ・ビルド／実行・GPU ベンチマーク（初見は CPU 本文のみで可）。 |
-| `bonsai-8b/Makefile` | **`model`**（GGUF ダウンロード＋SHA256 検証）、**`build.cpu`** / **`run.cpu`**、**`build.cpu-blas`** / **`run.cpu-blas`**、**`build.gpu-cuda`** / **`run.gpu-cuda`**、**`clean`**（`cpu`・`cpu-blas`・`gpu-cuda` を委譲）。**`cpu-omp` は未集約**（サブディレクトリの Makefile を直接使用）。 |
+| `bonsai-8b/Makefile` | **`model`**（GGUF ダウンロード＋SHA256 検証）、**`build.cpu`** / **`run.cpu`**、**`build.cpu-blas`** / **`run.cpu-blas`**、**`build.gpu-cuda`** / **`run.gpu-cuda`**、**`blackwell`** / **`build.blackwell`** / **`run.blackwell`**（**`gpu-cuda`** へ委譲）、**`clean`**（`cpu`・`cpu-blas`・`gpu-cuda` を委譲）。**`cpu-omp` は未集約**（サブディレクトリの Makefile を直接使用）。 |
 | `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-omp/Makefile` | **`bonsai-cpu-omp`** の生成（`-fopenmp`）。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、`-march=native -funroll-loops -ffast-math -mfma` 等）。`pkg-config openblas` があれば `-I`/`-L` を自動付与。 |
@@ -95,7 +95,7 @@
 | `bonsai-8b/gpu-cuda/main.c` | **`cpu-blas` をベースに CPU 演算を GPU API 呼び出しへ置換したホスト側**（GGUF 読み込み・トークナイザ・サンプリングは CPU）。**`gpu.h`** の C API 経由で **`kernels.cu`** を呼ぶ。 |
 | `bonsai-8b/gpu-cuda/kernels.cu` | **CUDA カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、単トークン／**バッチ** Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`** 等）。 |
 | `bonsai-8b/gpu-cuda/gpu.h` | **`GpuModel`** / **`gpu_model_create`** / **`gpu_forward`** / **`gpu_forward_prefill`** / **`gpu_copy_logits`** 等の C API（**`extern "C"`**）。 |
-| `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成（**`main.c`** → **`cc`**、**`kernels.cu`** → **`nvcc`**、リンクも **`nvcc`**。**`-lcudart`**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`** PTX、**`-use_fast_math`**）。 |
+| `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成（**`main.c`** → **`cc`**、**`kernels.cu`** → **`nvcc`**、リンクも **`nvcc`**。**`-lcudart`**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`** PTX、**`-use_fast_math`**）。**`blackwell`** / **`run.blackwell`**: apt **CUDA 11** 削除 → NVIDIA 公式 **`cuda-toolkit-13`** インストール → **`BLACKWELL_GENCODE=arch=compute_120,code=sm_120`** でビルド（要 **sudo**）。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL（`blob/main` 形式）。 |
 | `bonsai-8b/Bonsai-8B-Q1_0.gguf.sha256sum` | 既定 GGUF の SHA256 チェックサム（`make model` の検証に使用）。 |
 | `doc/design.md` | 本書。 |
@@ -110,6 +110,7 @@
 | `build.cpu` / `run.cpu` | `cpu/bonsai-cpu` | `cpu/main.c` |
 | `build.cpu-blas` / `run.cpu-blas` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
 | `build.gpu-cuda` / `run.gpu-cuda` | `gpu-cuda/bonsai-gpu-cuda` | `gpu-cuda/main.c` + `gpu-cuda/kernels.cu` |
+| `blackwell` / `build.blackwell` / `run.blackwell` | `gpu-cuda/bonsai-gpu-cuda`（Blackwell 向け **`sm_120`**） | `gpu-cuda/Makefile` の **`blackwell`**（CUDA 13 セットアップ＋ビルド） |
 
 **`cpu-omp/`** はルート Makefile からは呼ばず、次のようにサブディレクトリでビルドする。
 
@@ -117,7 +118,7 @@
 |------|------------|------|--------|
 | `bonsai-8b/cpu-omp/Makefile` | `build` / `run` / `clean` | `cpu-omp/bonsai-cpu-omp` | `cpu-omp/main.c` |
 | `bonsai-8b/cpu-blas/Makefile` | `build` / `run` / `clean` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
-| `bonsai-8b/gpu-cuda/Makefile` | `build` / `run` / `clean` | `gpu-cuda/bonsai-gpu-cuda` | `gpu-cuda/main.c` + `kernels.cu` |
+| `bonsai-8b/gpu-cuda/Makefile` | `build` / `run` / `clean` / **`blackwell`** / **`run.blackwell`** | `gpu-cuda/bonsai-gpu-cuda` | `gpu-cuda/main.c` + `kernels.cu` |
 
 **`bonsai-8b/Makefile`** 用変数:
 
@@ -163,6 +164,15 @@ make build.gpu-cuda
 # アーキテクチャ: gpu-cuda/Makefile の CUDA_GENCODE を上書き可能
 ```
 
+Blackwell GPU 版（RTX 50 系等。CUDA 13 必須）:
+
+```bash
+cd bonsai-8b
+make blackwell          # apt CUDA 11 削除 → CUDA 13 インストール → sm_120 ビルド（要 sudo）
+make run.blackwell      # 上記ビルド後に推論実行
+# または gpu-cuda/ で make blackwell / make run.blackwell
+```
+
 ## ビルドと実行（CPU）
 
 単スレッド:
@@ -197,7 +207,15 @@ make build
 ./bonsai-gpu-cuda ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 8
 ```
 
-**要件**: CUDA Toolkit（**`nvcc`**）、NVIDIA ドライバ、**`libcudart`**。cuBLAS は不要（Attention はカスタム CUDA カーネル）。
+**要件**: CUDA Toolkit（**`nvcc`**）、NVIDIA ドライバ、**`libcudart`**。cuBLAS は不要（Attention はカスタム CUDA カーネル）。Debian/Ubuntu の **`apt install nvidia-cuda-toolkit`** は **CUDA 11** 系であり、**Blackwell（compute capability 12.x）** には **CUDA 13 以降**が必要。
+
+**Blackwell（RTX 50 系等）** では **`make blackwell`** を使う（要 **sudo**）。処理内容:
+
+1. apt の **CUDA 11** 系パッケージ（**`nvidia-cuda-toolkit`** 等）を **`apt-get remove --purge`**
+2. NVIDIA 公式リポジトリ（**`cuda-keyring`**）を追加し **`cuda-toolkit-13`** をインストール（**`/usr/local/cuda/bin/nvcc`**）
+3. **`BLACKWELL_GENCODE=arch=compute_120,code=sm_120`** で **`bonsai-gpu-cuda`** をビルド
+
+対応 OS: Ubuntu 20.04 / 22.04 / 24.04、Debian 12 / 13。ルート **`bonsai-8b/Makefile`** の **`make blackwell`** / **`make run.blackwell`** も **`gpu-cuda/Makefile`** へ委譲する。
 
 ## 実行時の挙動（CPU）
 
@@ -350,7 +368,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（参考 decode **30.79 tok/s**）を推奨。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。
-- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s**（バッチ prefill）、decode **~50 tok/s**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**。**VRAM** に prefill バッチ（**`max_seq` 分**）含む。**Flash Attention** shared ≈ 65 KB/ブロック・**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
+- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s**（バッチ prefill）、decode **~50 tok/s**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**（PTX + ドライバ JIT）。**Blackwell（RTX 50 系）** は **CUDA 13 以降**と **`sm_120`** ネイティブコードが必要 — apt の **`nvidia-cuda-toolkit`（CUDA 11）** では不可。**`make blackwell`**（要 **sudo**）で CUDA 11 削除・**`cuda-toolkit-13`** インストール・Blackwell 向けビルドを一括実行。**VRAM** に prefill バッチ（**`max_seq` 分**）含む。**Flash Attention** shared ≈ 65 KB/ブロック・**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。

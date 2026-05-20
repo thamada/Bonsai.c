@@ -10,6 +10,7 @@ PROMPT  ?= Hello, how are you?
 	build.cpu run.cpu \
 	build.cpu-blas run.cpu-blas \
 	build.gpu-cuda run.gpu-cuda \
+	blackwell build.blackwell run.blackwell \
 	clean
 
 .DEFAULT_GOAL := all
@@ -71,6 +72,14 @@ build.gpu-cuda:
 	cd gpu-cuda && make build
 
 run.gpu-cuda: build.gpu-cuda
+	./gpu-cuda/bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
+
+# -----------------------------------------------------------------------------
+# Blackwell GPU（RTX 50 系等）: gpu-cuda/Makefile の blackwell を呼ぶ（要 sudo）
+blackwell build.blackwell:
+	cd gpu-cuda && $(MAKE) blackwell
+
+run.blackwell: build.blackwell
 	./gpu-cuda/bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
 
 # -----------------------------------------------------------------------------
