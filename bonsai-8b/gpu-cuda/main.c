@@ -12,7 +12,7 @@
  *   - Decode: 1 トークンずつ gpu_forward。
  *   - Q1_0 GEMV: 活性化 Q8_0 化 + vec_dot_q1_0_q8_0 CUDA カーネル。
  *   - Attention: Flash Attention（online softmax、att 行列非物質化、GQA 対応）。
- *   - KV キャッシュ: 既定 F32（`kc`/`vc`）。`--turboquant` で pack 圧縮バッファを追加（Attention は F32 KV）。
+ *   - KV キャッシュ: 既定 F32（`kc`/`vc`）。`--turboquant` で pack KV + 直近 64 トークン F32 リング（タグ付き、VRAM 約 5–7x 削減）。
  *   - サンプリングのみ CPU（logits を D2H コピー）。
  * チャット: GGUF tokenizer.chat_template（Qwen3）の user + 空 think ブロック付き assistant 開始。
  */

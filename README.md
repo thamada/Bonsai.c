@@ -395,7 +395,7 @@ bonsai-8b/gpu-cuda/
 | 重み | `token_embd`, 各層 `wq/wk/wv/wo/gate/up/down`, `output` | Q1_0（g128） |
 | 重み | `attn_norm`, `q_norm`, `k_norm`, `ffn_norm`, `output_norm` | F32 |
 | KV キャッシュ（既定） | `kc`, `vc` | F32、`n_layers × max_seq × kv_dim` |
-| KV キャッシュ（`--turboquant`） | `kc`, `vc` **および** `kc_pack`, `vc_pack` | **Attention は F32 `kc`/`vc`**。`kc_pack`/`vc_pack` は **TurboQuant** 圧縮コピー（PolarQuant 2-bit + QJL 1-bit / 座標、48 B/head、レイアウト `[layer][kv_head][seq_pos]`）。F32 と pack を**併存**（VRAM は F32 単独より増） |
+| KV キャッシュ（`--turboquant`） | `kc_pack`, `vc_pack`, `kc_win`, `vc_win`, `kc_win_pos`, `vc_win_pos` | **pack**（K: 48 B/head Polar+QJL、V: 32 B/head MSE のみ）+ **直近 64 トークン F32 リング**（`FA_BR`、スロットは `win_pos[slot]==pos` でタグ照合しエイリアス誤読を防止）。フル F32 `kc`/`vc` は**確保しない**（約 **5–7x** VRAM 削減）。`TQ_F32_MIRROR=1` で従来の全系列 F32 ミラー（デバッグ） |
 | Decode 用活性化 | `x`, `xb`, `xb2`, `q`, `k`, `v`, `hb`, `hb2`, `logits`, `q8` | F32 / Q8_0 |
 | Prefill 用バッチ | `x_batch`, `xb_batch`, … `q8_batch` 等 | `-l`（`max_seq`）トークン分を事前確保 |
 
@@ -420,8 +420,8 @@ Prefill 中のプログレスバーは **0% → バッチ完了で 100%** です
 3. **Q/K/V 投影** — `gpu_mm`（Q1_0 GEMV、後述）で `q`, `k`, `v` を計算。
 4. **Q/K head norm** — `rmsnorm_head_kernel`。
 5. **RoPE** — `rope_neox_kernel`（NeoX 半分ペア）。cos/sin テーブルは **CPU で YaRN メタを解釈して生成**し、`rope_cache` へ H2D。
-6. **KV 書き込み** — F32 `kc`/`vc` へ D2D コピー。**`--turboquant`** 時は **`kv_tq_compress_kernel`** で `kc_pack`/`vc_pack` へ圧縮も実行（F32 へのコピーは省略しない）。
-7. **Attention** — `flash_attn_gqa_kernel`（後述）。**F32 `kc`/`vc`** を参照（`--turboquant` 時も同じ）。出力は `xb`。
+6. **KV 書き込み** — **`--turboquant`**: `kv_tq_compress_kernel` で pack へ圧縮 + `kv_write_ring_kernel` で直近ウィンドウへ F32 コピー。未指定時は F32 `kc`/`vc` へ D2D。
+7. **Attention** — `flash_attn_gqa_kernel`。**`--turboquant`**: 直近 64 位置でタグ一致時のみ `kc_win`/`vc_win` の F32 dot、それ以前は pack（K: `Pi^T·centroid` + QJL、V: `Pi^T·centroid`）。出力は `xb`。
 8. **出力投影 + 残差** — `gpu_mm`（`wo`）→ `add_kernel`。
 9. **FFN 前 norm** → **gate/up 投影** → **SwiGLU** → **down 投影** → **残差**。
 10. **最終 norm + LM head** — `rmsnorm_kernel` → `gpu_mm`（`output`）→ `logits`。
@@ -437,8 +437,8 @@ Prefill 中のプログレスバーは **0% → バッチ完了で 100%** です
 | Q/K/V/O, gate/up/down | `gpu_mm_batch` | `(token, 出力行)` ごとに並列 |
 | Q/K head norm | `rmsnorm_head_batch_kernel` | 1 block / `(token, head)` |
 | RoPE | `rope_neox_batch_kernel` | 1 block / `(token, head)`、位置別 cos/sin |
-| KV 書き込み | `kv_write_batch_kernel`（F32） / **`--turboquant`** 時は **`kv_tq_compress_batch_kernel`** も | 1 block / トークン → F32。**`--turboquant`** 時は pack 圧縮のあと **`kv_write_batch`** で F32 も填充 |
-| Attention | `flash_attn_prefill_gqa_kernel` | 1 block / `(token, head)`、因果マスク `npos = t + 1`（**F32 `kc`/`vc`**） |
+| KV 書き込み | **`--turboquant`**: `kv_tq_compress_batch` + `kv_write_ring_batch` / 既定: `kv_write_batch`（F32） | pack + リングウィンドウ、または全系列 F32 |
+| Attention | `flash_attn_prefill_gqa_kernel` | 1 block / `(token, head)`、因果マスク `npos = t + 1`（turboquant 時は pack+win） |
 | 残差・SwiGLU | `add_batch_kernel`, `swiglu_batch_kernel` | 要素並列 |
 
 Attention 以降の FFN もすべてバッチ版カーネルで、`x_batch` に `[n_tokens, dim]` 形状の隠れ状態を保持します。
@@ -457,7 +457,7 @@ Decode 版は出力次元 `d` 方向に 256 スレッド/block で並列。Prefi
 
 #### Flash Attention（GQA、online softmax）
 
-`att` 行列 `[n_heads, seq, seq]` は **materialize しません**。K/V キャッシュをシーケンス方向に **64 トークン（`FA_BR`）タイル**で走査し、**online softmax**（running max `m` と sum `l`）で出力を更新します。**現行 forward 経路**は K/V を **F32 `kc`/`vc`** から shared memory へロードします。
+`att` 行列 `[n_heads, seq, seq]` は **materialize しません**。K/V を **64 トークン（`FA_BR`）タイル**で走査し、**online softmax** で更新します。**`--turboquant`** ではタイル内の各位置について、直近 64 トークン以内かつ `win_pos[slot]==pos` なら F32 リング、それ以外は pack 復元を使い分けます。
 
 - **Decode** — `flash_attn_gqa_kernel`: grid = `n_heads` blocks × `FA_HD`（128）threads。1 クエリ位置（現在トークン）× 全ヘッド。GQA: ヘッド `h` は KV ヘッド `h / kv_mul` を参照。
 - **Prefill** — `flash_attn_prefill_gqa_kernel`: grid = `n_tokens × n_heads` blocks。位置 `t` のクエリは **因果マスク**により K/V の `0 … t` のみ参照（`npos = t + 1`）。
@@ -479,8 +479,8 @@ CPU 側（`build_rope_cache_host`）で llama.cpp 準拠の **NeoX 半分ペア*
 
 - 対象 GGUF: **`Bonsai-8B-Q1_0`**（Q1_0 g128 + F32 norm）。他量子化形式は未対応。
 - `head_dim > 128`（`FA_HD`）のモデルでは Flash Attention カーネルが no-op になります（Bonsai-8B では `head_dim = 128`）。
-- Prefill と Decode で **F32 `kc`/`vc`** は共有 — Prefill 後の Decode は `pos = n_prompt` から続き、Prefill で填充済みの F32 KV をそのまま参照します。
-- **TurboQuant**（Google Research, [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)）: ランダム直交回転後の Lloyd-Max スカラー量子化（PolarQuant）+ 残差 1-bit QJL。学習不要・推論時オンライン適用。CLI: **`--turboquant`** で pack 圧縮を追加（未指定時は F32 KV のみ）。**`head_dim != 128`** のときは自動無効化。**Attention は F32 KV を参照**（`kernels.cu` 内の TurboQuant Attention 分岐は未接続）。**`--turboquant` 時も VRAM 節約効果は現状なし**（F32 と pack を併存）。
+- **`--turboquant`**: Prefill で pack + リングを填充。Decode は `pos = n_prompt` から pack/リングに追記し Attention。**プロンプト長 ≤ 64** なら因果参照の大半が F32 ウィンドウ内。**それより長い文脈**は pack 近似に依存（品質は `TQ_F32_MIRROR=1` が上限）。
+- **TurboQuant**（[arXiv:2504.19874](https://arxiv.org/abs/2504.19874)）: K は PolarQuant 2-bit + QJL（内積向け）、V は PolarQuant のみ（MSE、論文通り QJL なし）。**`head_dim != 128`** で自動無効化。環境変数 **`TQ_F32_MIRROR=1`** で全系列 F32 ミラー（VRAM 増・デバッグ用）。
 
 ### 必要なもの
 

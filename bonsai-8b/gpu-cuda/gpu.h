@@ -26,7 +26,10 @@ typedef struct {
 /* TurboQuant KV: polar_bits (2–4) + 1-bit QJL per head_dim coordinate */
 #define GPU_TQ_DIM         128
 #define GPU_TQ_POLAR_BITS  2
-#define GPU_TQ_ENTRY_BYTES (TQ_ENTRY_BYTES(GPU_TQ_DIM, GPU_TQ_POLAR_BITS))
+/* K: PolarQuant 2-bit + QJL 1-bit/座標 (inner product)。V: PolarQuant のみ (MSE, 論文通り QJL なし) */
+#define GPU_TQ_K_ENTRY_BYTES (TQ_ENTRY_BYTES(GPU_TQ_DIM, GPU_TQ_POLAR_BITS))
+#define GPU_TQ_V_ENTRY_BYTES (TQ_INDICES_BYTES(GPU_TQ_DIM, GPU_TQ_POLAR_BITS))
+#define GPU_TQ_ENTRY_BYTES   GPU_TQ_K_ENTRY_BYTES /* 後方互換 */
 
 typedef struct {
     int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq;

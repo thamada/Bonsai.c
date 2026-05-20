@@ -4,6 +4,28 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 04:24:09
+
+**`bonsai-8b/gpu-cuda/kernels.cu`**: 長文品質崩れの主因だった **F32 リングのスロットエイリアス**を修正 — **`kc_win_pos`/`vc_win_pos`**（`win_pos[slot]=pos`）と **`dev_tq_win_hit`** でタグ一致時のみ F32 K/V を参照。**`FA_BR` を 32→64** に拡大。pack 区間の K スコアを **`dev_tq_score_key`**（**`Pi^T·centroid`** と **`q`** の dot + QJL）に変更。**`kv_write_ring_*`** がタグを更新。**`flash_attn_*`** に win_pos 引数を追加。
+
+**`README.md` / `README.en.md`**: 上記（64 トークン win、タグ照合、VRAM **5–7×**、長文は pack 依存）を GPU 付録に反映。
+
+**`bonsai-8b/gpu-cuda/main.c`**: KV コメントを 64 トークン・タグ付きリングに更新。
+
+**`doc/design.md`**: ベンチマーク注記・実行挙動・VRAM 表・Attention・環境変数・CLI・量子化節・制約を **FA_BR=64**・**win_pos**・タグ付き pack+win に全面更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-21 03:58:49
+
+**`bonsai-8b/gpu-cuda/`**: TurboQuant KV を **pack + 直近 32 トークン F32 リング**（`kc_win`/`vc_win`）に再設計 — フル F32 `kc`/`vc` は確保しない（約 **7×** VRAM 削減）。K pack **48 B/head**（Polar+QJL）、V pack **32 B/head**（Polar のみ・QJL なし）。Attention 既定は **pack+win ハイブリッド**（`dev_tq_load_k_tile`/`dev_tq_load_v_tile`）。**`TQ_F32_MIRROR=1`** で全系列 F32 ミラー（デバッグ）。**`TQ_PACK_ATTN`** 等の旧環境変数は削除。**`turboquant_compress_value`** / **`gpu_tq_compress_*`** で K/V 圧縮を分離。
+
+**`README.md` / `README.en.md`**: 上記を GPU 付録に反映（作業ツリー）。
+
+**`doc/design.md`**: VRAM 表・実行挙動・Attention・環境変数・制約を pack+win 設計に全面更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 03:21:36
 
 **`bonsai-8b/gpu-cuda/kernels.cu`**: TurboQuant Attention を **環境変数で切替** — 既定 **F32 ミラー**（pack 圧縮 + F32 `kc`/`vc` 填充、品質優先）。**`TQ_PACK_ATTN=1`** で **pack のみ Attention**（実験・`attn=pack`）。**`TQ_F32_MIRROR`** / **`TQ_PACK_MAX_LAYER`** / **`TQ_PREFILL_MIRROR`** で層・フェーズ制御。**Flash Attention** タイル **`FA_BR` を 64→32** に変更。Attention カーネルへ TurboQuant テーブルを**ポインタ引数**で渡す。softmax 還元に **`fmaxf(l, 1e-20f)`**。

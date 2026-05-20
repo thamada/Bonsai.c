@@ -220,6 +220,26 @@ static void tq_matvec(const float *m, const float *x, float *y, int dim)
     }
 }
 
+void turboquant_compress_value(const TurboQuantTables *tq, const float *x,
+                               uint8_t *out_indices)
+{
+    const int d = tq->dim;
+    float *y = (float *)malloc((size_t)d * sizeof(float));
+    int *idx = (int *)malloc((size_t)d * sizeof(int));
+    if (!y || !idx) {
+        free(y);
+        free(idx);
+        return;
+    }
+    tq_matvec(tq->pi, x, y, d);
+    for (int i = 0; i < d; i++)
+        idx[i] = tq_quantize_coord(tq, y[i]);
+    memset(out_indices, 0, (size_t)TQ_INDICES_BYTES(d, tq->polar_bits));
+    tq_pack_indices(tq, idx, out_indices);
+    free(y);
+    free(idx);
+}
+
 void turboquant_compress(const TurboQuantTables *tq, const float *x,
                          TurboQuantPacked *out)
 {

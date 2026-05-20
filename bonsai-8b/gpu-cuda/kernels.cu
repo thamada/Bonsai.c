@@ -2,7 +2,8 @@
  * Bonsai GPU forward — CUDA kernels。
  * Q1_0 GEMV: 活性化 Q8_0 化 + vec_dot_q1_0_q8_0（cpu-blas 準拠）。
  * Attention: Flash Attention + K/V shared-memory タイル staging（online softmax）。
- * TurboQuant: pack 圧縮 + 既定 F32 ミラー Attention。TQ_PACK_ATTN=1 で pack のみ（実験）。
+ * TurboQuant: pack KV のみ（VRAM 節約）。Attention は pack + 現トークン F32 K/V。
+ * TQ_F32_MIRROR=1 で従来の F32 キャッシュ併用（デバッグ用）。
  */
 
 #include "gpu.h"
@@ -21,27 +22,10 @@
 
 #define DT_Q1_0 41
 
-/* 既定: F32 ミラー Attention（品質）。TQ_PACK_ATTN=1 で pack のみ（実験・近似）。 */
-static int gpu_tq_pack_attn_layer(int layer)
+/* 1 = pack Attention（既定）。TQ_F32_MIRROR=1 で F32 ミラーに切替。 */
+static int gpu_tq_use_pack_attn(void)
 {
-    if (getenv("TQ_F32_MIRROR") || !getenv("TQ_PACK_ATTN"))
-        return 0;
-    const char *cap = getenv("TQ_PACK_MAX_LAYER");
-    if (!cap)
-        return 1;
-    return layer <= atoi(cap);
-}
-
-static int gpu_tq_pack_attn_prefill(int layer)
-{
-    if (getenv("TQ_PREFILL_MIRROR"))
-        return 0;
-    return gpu_tq_pack_attn_layer(layer);
-}
-
-static int gpu_tq_pack_attn_decode(int layer)
-{
-    return gpu_tq_pack_attn_layer(layer);
+    return getenv("TQ_F32_MIRROR") ? 0 : 1;
 }
 
 #define TQ_ATTN_TABLE_ARGS(gm) \
@@ -53,7 +37,7 @@ static int gpu_tq_pack_attn_decode(int layer)
 
 /* Flash Attention: K/V タイルを shared memory に staging（head_dim=128 固定）。
  * shared ≈ 2×FA_BR×FA_HD + q/o/scores/red ≈ 65 KB → carveout opt-in で 48 KB 超を許可。 */
-#define FA_BR  32
+#define FA_BR  64   /* F32 リング幅: 長文では直近これだけ真値 dot、超過分は pack */
 #define FA_HD  128   /* Bonsai-8B head_dim */
 
 #define TQ_HD          GPU_TQ_DIM
@@ -61,6 +45,7 @@ static int gpu_tq_pack_attn_decode(int layer)
 /* head_dim=128, polar_bits=2 → 32 index bytes + 16 QJL bytes */
 #define TQ_IND_BYTES_N 32
 #define TQ_QJL_PACK_N  16
+#define TQ_V_IND_BYTES_N TQ_INDICES_BYTES(GPU_TQ_DIM, GPU_TQ_POLAR_BITS)
 
 typedef struct {
     const float *centroids;
@@ -118,42 +103,83 @@ static __device__ size_t dev_tq_kv_offset(int layer, int kvh, int pos, int max_s
         + ((size_t)kvh * (size_t)max_seq + (size_t)pos) * entry_bytes;
 }
 
+/* pack K: y_hat=centroids[idx] → k≈Pi^T y_hat と q の dot + QJL 残差（softmax 向け） */
 static __device__ float dev_tq_score_key(const DevTurboQuant *tq,
-    const float *q_rot, const float *sq,
+    const float *q_sh, const float *sq,
     const uint8_t *indices, const uint8_t *qjl)
 {
-    float base = 0.0f;
     const int d = tq->dim;
     const int bits = tq->polar_bits;
-    for (int i = 0; i < d; i++) {
-        int idx = dev_tq_unpack_idx(indices, i, bits);
-        base += q_rot[i] * tq->centroids[idx];
+    float base = 0.0f;
+    for (int col = 0; col < d; col++) {
+        float kc = 0.0f;
+        for (int k = 0; k < d; k++) {
+            const int idx = dev_tq_unpack_idx(indices, k, bits);
+            kc += tq->pi[(size_t)k * (size_t)d + (size_t)col] * tq->centroids[idx];
+        }
+        base += q_sh[col] * kc;
     }
     float corr = 0.0f;
     for (int i = 0; i < d; i++) {
-        int sign = (qjl[i >> 3] >> (i & 7)) & 1;
+        const int sign = (qjl[i >> 3] >> (i & 7)) & 1;
         corr += fabsf(sq[i]) * (sign ? 1.0f : -1.0f);
     }
     return base + TQ_QJL_SCALE * corr;
 }
 
-/* V タイル: polar centroid のみ → Pi^T（QJL 符号は K スコア側で query sq と併用） */
+/* リング: slot=pos%FA_BR に win_pos[slot]==pos のときだけ F32 を信頼（エイリアス回避） */
+static __device__ int dev_tq_win_hit(int pos, int attn_pos, int slot, const int *win_pos)
+{
+    return win_pos && (attn_pos - pos) < FA_BR && win_pos[slot] == pos;
+}
+
+static __device__ float dev_tq_score_at(const DevTurboQuant *tq,
+    const float *q_sh, const float *q_rot_sh, const float *sq_sh,
+    const uint8_t *kc_pack, int layer, int kvh, int pos, int max_seq, int n_kv,
+    size_t tq_k_entry, int attn_pos, int kv_dim,
+    const float *k_win_layer, const int *k_win_pos)
+{
+    const int d = tq->dim;
+    const int slot = pos % FA_BR;
+    if (dev_tq_win_hit(pos, attn_pos, slot, k_win_pos)) {
+        const float *kh = k_win_layer + (size_t)kvh * d;
+        float s = 0.0f;
+        for (int i = 0; i < d; i++)
+            s += q_sh[i] * kh[(size_t)slot * kv_dim + i];
+        return s;
+    }
+    const uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, tq_k_entry);
+    return dev_tq_score_key(tq, q_sh, sq_sh, kp, kp + TQ_IND_BYTES_N);
+}
+
 static __device__ void dev_tq_load_v_tile(const DevTurboQuant *tq,
     const uint8_t *vc_pack, int layer, int kvh, int t0, int tc,
-    int max_seq, int n_kv, size_t tq_entry,
+    int max_seq, int n_kv, size_t tq_v_entry, int attn_pos, int kv_dim,
+    const float *v_win_layer, const int *v_win_pos,
     float y_hat_buf[FA_BR][FA_HD], float v_tile[FA_BR][FA_HD])
 {
     const int d = tq->dim;
+    const float *vh = v_win_layer ? (v_win_layer + (size_t)kvh * d) : NULL;
     for (int idx = (int)threadIdx.x; idx < tc * d; idx += (int)blockDim.x) {
         const int j = idx / d;
         const int i = idx - j * d;
-        const uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, t0 + j, max_seq, n_kv, tq_entry);
+        const int pos = t0 + j;
+        const int slot = pos % FA_BR;
+        if (dev_tq_win_hit(pos, attn_pos, slot, v_win_pos)) {
+            v_tile[j][i] = vh[(size_t)slot * kv_dim + i];
+            continue;
+        }
+        const uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, tq_v_entry);
         const int qidx = dev_tq_unpack_idx(vp, i, tq->polar_bits);
         y_hat_buf[j][i] = tq->centroids[qidx];
     }
     __syncthreads();
     for (int col = (int)threadIdx.x; col < d; col += (int)blockDim.x) {
         for (int j = 0; j < tc; j++) {
+            const int pos = t0 + j;
+            const int slot = pos % FA_BR;
+            if (dev_tq_win_hit(pos, attn_pos, slot, v_win_pos))
+                continue;
             float s = 0.0f;
             for (int k = 0; k < d; k++)
                 s += tq->pi[k * d + col] * y_hat_buf[j][k];
@@ -163,7 +189,30 @@ static __device__ void dev_tq_load_v_tile(const DevTurboQuant *tq,
     __syncthreads();
 }
 
-static __device__ void dev_tq_compress_par(const DevTurboQuant *tq,
+static __device__ void dev_tq_compress_value_par(const DevTurboQuant *tq,
+    const float *x_sh, float *y_rot_sh, uint8_t *out_indices)
+{
+    const int d = tq->dim;
+    const int bits = tq->polar_bits;
+
+    dev_tq_matvec_pi_par(tq, x_sh, y_rot_sh);
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        for (int b = 0; b < TQ_V_IND_BYTES_N; b++) out_indices[b] = 0;
+        for (int i = 0; i < d; i++) {
+            float v = y_rot_sh[i];
+            int idx = 0;
+            while (idx < tq->n_levels - 1 && v >= tq->boundaries[idx + 1])
+                idx++;
+            const int bitpos = i * bits;
+            out_indices[bitpos >> 3] |= (uint8_t)((idx & ((1 << bits) - 1)) << (bitpos & 7));
+        }
+    }
+    __syncthreads();
+}
+
+static __device__ void dev_tq_compress_key_par(const DevTurboQuant *tq,
     const float *x_sh, float *y_rot_sh, float *res_sh,
     uint8_t *out_indices, uint8_t *out_qjl)
 {
@@ -208,24 +257,25 @@ static __global__ void kv_tq_compress_kernel(uint8_t *kc_pack, uint8_t *vc_pack,
 {
     const int kvh = (int)blockIdx.x;
     if (kvh >= n_kv) return;
-    const size_t entry = (size_t)GPU_TQ_ENTRY_BYTES;
+    const size_t k_entry = (size_t)GPU_TQ_K_ENTRY_BYTES;
+    const size_t v_entry = (size_t)GPU_TQ_V_ENTRY_BYTES;
     __shared__ float x_sh[FA_HD];
     __shared__ float y_rot_sh[FA_HD];
     __shared__ float res_sh[FA_HD];
 
     const float *ks = k + (size_t)kvh * hd;
     const float *vs = v + (size_t)kvh * hd;
-    uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, entry);
-    uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, entry);
+    uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, k_entry);
+    uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, v_entry);
 
     if (threadIdx.x < hd) x_sh[threadIdx.x] = ks[threadIdx.x];
     __syncthreads();
-    dev_tq_compress_par(&tq, x_sh, y_rot_sh, res_sh, kp, kp + TQ_IND_BYTES_N);
+    dev_tq_compress_key_par(&tq, x_sh, y_rot_sh, res_sh, kp, kp + TQ_IND_BYTES_N);
     __syncthreads();
 
     if (threadIdx.x < hd) x_sh[threadIdx.x] = vs[threadIdx.x];
     __syncthreads();
-    dev_tq_compress_par(&tq, x_sh, y_rot_sh, res_sh, vp, vp + TQ_IND_BYTES_N);
+    dev_tq_compress_value_par(&tq, x_sh, y_rot_sh, vp);
 }
 
 static __global__ void kv_tq_compress_batch_kernel(uint8_t *kc_pack, uint8_t *vc_pack,
@@ -236,24 +286,25 @@ static __global__ void kv_tq_compress_batch_kernel(uint8_t *kc_pack, uint8_t *vc
     const int t = tid / n_kv;
     const int kvh = tid % n_kv;
     if (t >= n_tokens || kvh >= n_kv) return;
-    const size_t entry = (size_t)GPU_TQ_ENTRY_BYTES;
+    const size_t k_entry = (size_t)GPU_TQ_K_ENTRY_BYTES;
+    const size_t v_entry = (size_t)GPU_TQ_V_ENTRY_BYTES;
     __shared__ float x_sh[FA_HD];
     __shared__ float y_rot_sh[FA_HD];
     __shared__ float res_sh[FA_HD];
 
     const float *ks = k_batch + (size_t)t * kv_dim + (size_t)kvh * hd;
     const float *vs = v_batch + (size_t)t * kv_dim + (size_t)kvh * hd;
-    uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, t, max_seq, n_kv, entry);
-    uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, t, max_seq, n_kv, entry);
+    uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, t, max_seq, n_kv, k_entry);
+    uint8_t *vp = vc_pack + dev_tq_kv_offset(layer, kvh, t, max_seq, n_kv, v_entry);
 
     if (threadIdx.x < hd) x_sh[threadIdx.x] = ks[threadIdx.x];
     __syncthreads();
-    dev_tq_compress_par(&tq, x_sh, y_rot_sh, res_sh, kp, kp + TQ_IND_BYTES_N);
+    dev_tq_compress_key_par(&tq, x_sh, y_rot_sh, res_sh, kp, kp + TQ_IND_BYTES_N);
     __syncthreads();
 
     if (threadIdx.x < hd) x_sh[threadIdx.x] = vs[threadIdx.x];
     __syncthreads();
-    dev_tq_compress_par(&tq, x_sh, y_rot_sh, res_sh, vp, vp + TQ_IND_BYTES_N);
+    dev_tq_compress_value_par(&tq, x_sh, y_rot_sh, vp);
 }
 
 static __device__ float fa_sh_reduce_max(float val, float *red_sh)
@@ -288,6 +339,8 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
     int kv_dim, int kv_mul, float scale,
     const uint8_t *kc_pack, const uint8_t *vc_pack,
     int layer, int max_seq, int n_kv, int use_tq,
+    int attn_pos, const float *k_win, const float *v_win,
+    const int *k_win_pos, const int *v_win_pos,
     const float *tq_centroids, const float *tq_boundaries,
     const float *tq_pi, const float *tq_s,
     int tq_dim, int tq_polar_bits, int tq_n_levels)
@@ -309,7 +362,14 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
     const float *kbase = kc + (size_t)kvh * hd;
     const float *vbase = vc + (size_t)kvh * hd;
     float *oh = xb + (size_t)h * hd;
-    const size_t tq_entry = (size_t)GPU_TQ_ENTRY_BYTES;
+    const size_t tq_k_entry = (size_t)GPU_TQ_K_ENTRY_BYTES;
+    const size_t tq_v_entry = (size_t)GPU_TQ_V_ENTRY_BYTES;
+    const size_t win_layer = (size_t)layer * (size_t)FA_BR * (size_t)kv_dim;
+    const size_t win_tag_layer = (size_t)layer * (size_t)FA_BR;
+    const float *k_win_layer = k_win ? (k_win + win_layer) : NULL;
+    const float *v_win_layer = v_win ? (v_win + win_layer) : NULL;
+    const int *k_pos_layer = k_win_pos ? (k_win_pos + win_tag_layer) : NULL;
+    const int *v_pos_layer = v_win_pos ? (v_win_pos + win_tag_layer) : NULL;
 
     __shared__ float k_tile[FA_BR][FA_HD];
     __shared__ float v_tile[FA_BR][FA_HD];
@@ -343,13 +403,13 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
         if (use_tq && kc_pack && vc_pack && tq.centroids) {
             if (threadIdx.x < tc) {
                 const int pos = t0 + threadIdx.x;
-                const uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, tq_entry);
-                scores[threadIdx.x] = dev_tq_score_key(&tq, q_rot_sh, sq_sh,
-                    kp, kp + TQ_IND_BYTES_N) * scale;
+                scores[threadIdx.x] = dev_tq_score_at(&tq, q_sh, q_rot_sh, sq_sh,
+                    kc_pack, layer, kvh, pos, max_seq, n_kv, tq_k_entry, attn_pos, kv_dim,
+                    k_win_layer, k_pos_layer) * scale;
             }
             __syncthreads();
-            dev_tq_load_v_tile(&tq, vc_pack, layer, kvh, t0, tc, max_seq, n_kv, tq_entry,
-                k_tile, v_tile);
+            dev_tq_load_v_tile(&tq, vc_pack, layer, kvh, t0, tc, max_seq, n_kv, tq_v_entry,
+                attn_pos, kv_dim, v_win_layer, v_pos_layer, k_tile, v_tile);
             __syncthreads();
         } else if (kc && vc) {
             for (int idx = threadIdx.x; idx < tc * hd; idx += blockDim.x) {
@@ -411,6 +471,8 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
     int kv_dim, int kv_mul, float scale,
     const uint8_t *kc_pack, const uint8_t *vc_pack,
     int layer, int max_seq, int n_kv, int use_tq,
+    const float *k_win, const float *v_win,
+    const int *k_win_pos, const int *v_win_pos,
     const float *tq_centroids, const float *tq_boundaries,
     const float *tq_pi, const float *tq_s,
     int tq_dim, int tq_polar_bits, int tq_n_levels)
@@ -435,7 +497,15 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
     const float *kbase = kc + (size_t)kvh * hd;
     const float *vbase = vc + (size_t)kvh * hd;
     float *oh = xb + ((size_t)t * n_heads + h) * hd;
-    const size_t tq_entry = (size_t)GPU_TQ_ENTRY_BYTES;
+    const size_t tq_k_entry = (size_t)GPU_TQ_K_ENTRY_BYTES;
+    const size_t tq_v_entry = (size_t)GPU_TQ_V_ENTRY_BYTES;
+    const int attn_pos = t;
+    const size_t win_layer = (size_t)layer * (size_t)FA_BR * (size_t)kv_dim;
+    const size_t win_tag_layer = (size_t)layer * (size_t)FA_BR;
+    const float *k_win_layer = k_win ? (k_win + win_layer) : NULL;
+    const float *v_win_layer = v_win ? (v_win + win_layer) : NULL;
+    const int *k_pos_layer = k_win_pos ? (k_win_pos + win_tag_layer) : NULL;
+    const int *v_pos_layer = v_win_pos ? (v_win_pos + win_tag_layer) : NULL;
 
     __shared__ float k_tile[FA_BR][FA_HD];
     __shared__ float v_tile[FA_BR][FA_HD];
@@ -469,13 +539,13 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
         if (use_tq && kc_pack && vc_pack && tq.centroids) {
             if (threadIdx.x < tc) {
                 const int pos = t0 + threadIdx.x;
-                const uint8_t *kp = kc_pack + dev_tq_kv_offset(layer, kvh, pos, max_seq, n_kv, tq_entry);
-                scores[threadIdx.x] = dev_tq_score_key(&tq, q_rot_sh, sq_sh,
-                    kp, kp + TQ_IND_BYTES_N) * scale;
+                scores[threadIdx.x] = dev_tq_score_at(&tq, q_sh, q_rot_sh, sq_sh,
+                    kc_pack, layer, kvh, pos, max_seq, n_kv, tq_k_entry, attn_pos, kv_dim,
+                    k_win_layer, k_pos_layer) * scale;
             }
             __syncthreads();
-            dev_tq_load_v_tile(&tq, vc_pack, layer, kvh, t0, tc, max_seq, n_kv, tq_entry,
-                k_tile, v_tile);
+            dev_tq_load_v_tile(&tq, vc_pack, layer, kvh, t0, tc, max_seq, n_kv, tq_v_entry,
+                attn_pos, kv_dim, v_win_layer, v_pos_layer, k_tile, v_tile);
             __syncthreads();
         } else if (kc && vc) {
             for (int idx = threadIdx.x; idx < tc * hd; idx += blockDim.x) {
@@ -817,6 +887,33 @@ static __global__ void add_batch_kernel(float *a, const float *b, int n, int n_t
     a[i] += b[i];
 }
 
+static __global__ void kv_write_ring_kernel(float *kc_win, int *win_pos, const float *src,
+    int pos, int layer, int kv_dim, int win_cap)
+{
+    const int slot = pos % win_cap;
+    const size_t loff = (size_t)layer * (size_t)win_cap * (size_t)kv_dim;
+    float *dst = kc_win + loff + (size_t)slot * (size_t)kv_dim;
+    for (int i = (int)threadIdx.x; i < kv_dim; i += (int)blockDim.x)
+        dst[i] = src[i];
+    if (win_pos && threadIdx.x == 0)
+        win_pos[(size_t)layer * (size_t)win_cap + (size_t)slot] = pos;
+}
+
+static __global__ void kv_write_ring_batch_kernel(float *kc_win, int *win_pos,
+    const float *src, int layer, int kv_dim, int win_cap, int n_tokens)
+{
+    const int t = (int)blockIdx.x;
+    if (t >= n_tokens) return;
+    const int slot = t % win_cap;
+    const size_t loff = (size_t)layer * (size_t)win_cap * (size_t)kv_dim;
+    const float *srow = src + (size_t)t * kv_dim;
+    float *drow = kc_win + loff + (size_t)slot * (size_t)kv_dim;
+    for (int i = (int)threadIdx.x; i < kv_dim; i += (int)blockDim.x)
+        drow[i] = srow[i];
+    if (win_pos && threadIdx.x == 0)
+        win_pos[(size_t)layer * (size_t)win_cap + (size_t)slot] = t;
+}
+
 static __global__ void kv_write_batch_kernel(float *kc, const float *src,
     int kv_dim, int n_tokens)
 {
@@ -892,6 +989,8 @@ struct GpuModel {
     float *x, *xb, *xb2, *hb, *hb2;
     float *q, *k, *v, *logits;
     float *kc, *vc;
+    float *kc_win, *vc_win;
+    int *kc_win_pos, *vc_win_pos;
     uint8_t *kc_pack, *vc_pack;
     GpuBlockQ8_0 *q8;
     int q8_nb;
@@ -1164,19 +1263,42 @@ GpuModel *gpu_model_create(const GpuConfig *cfg, const GpuWeightsHost *host)
         gm->tq_dev.dim = GPU_TQ_DIM;
         gm->tq_dev.polar_bits = GPU_TQ_POLAR_BITS;
         gm->tq_dev.n_levels = nl;
-        size_t pack_bytes = (size_t)L * max_seq * cfg->n_kv_heads * GPU_TQ_ENTRY_BYTES;
-        CUDA_CHECK(cudaMalloc(&gm->kc_pack, pack_bytes));
-        CUDA_CHECK(cudaMalloc(&gm->vc_pack, pack_bytes));
-        CUDA_CHECK(cudaMemset(gm->kc_pack, 0, pack_bytes));
-        CUDA_CHECK(cudaMemset(gm->vc_pack, 0, pack_bytes));
-        CUDA_CHECK(cudaMalloc(&gm->kc, (size_t)L * max_seq * kv_dim * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&gm->vc, (size_t)L * max_seq * kv_dim * sizeof(float)));
+        size_t pack_per_head = (size_t)GPU_TQ_K_ENTRY_BYTES + (size_t)GPU_TQ_V_ENTRY_BYTES;
+        size_t k_pack_bytes = (size_t)L * max_seq * cfg->n_kv_heads * (size_t)GPU_TQ_K_ENTRY_BYTES;
+        size_t v_pack_bytes = (size_t)L * max_seq * cfg->n_kv_heads * (size_t)GPU_TQ_V_ENTRY_BYTES;
+        CUDA_CHECK(cudaMalloc(&gm->kc_pack, k_pack_bytes));
+        CUDA_CHECK(cudaMalloc(&gm->vc_pack, v_pack_bytes));
+        CUDA_CHECK(cudaMemset(gm->kc_pack, 0, k_pack_bytes));
+        CUDA_CHECK(cudaMemset(gm->vc_pack, 0, v_pack_bytes));
+        gm->kc = NULL;
+        gm->vc = NULL;
+        if (getenv("TQ_F32_MIRROR")) {
+            CUDA_CHECK(cudaMalloc(&gm->kc, (size_t)L * max_seq * kv_dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&gm->vc, (size_t)L * max_seq * kv_dim * sizeof(float)));
+            gm->kc_win = NULL;
+            gm->vc_win = NULL;
+            gm->kc_win_pos = NULL;
+            gm->vc_win_pos = NULL;
+        } else {
+            size_t win_bytes = (size_t)L * FA_BR * kv_dim * sizeof(float);
+            size_t win_tag_bytes = (size_t)L * FA_BR * sizeof(int);
+            CUDA_CHECK(cudaMalloc(&gm->kc_win, win_bytes));
+            CUDA_CHECK(cudaMalloc(&gm->vc_win, win_bytes));
+            CUDA_CHECK(cudaMalloc(&gm->kc_win_pos, win_tag_bytes));
+            CUDA_CHECK(cudaMalloc(&gm->vc_win_pos, win_tag_bytes));
+            CUDA_CHECK(cudaMemset(gm->kc_win, 0, win_bytes));
+            CUDA_CHECK(cudaMemset(gm->vc_win, 0, win_bytes));
+            CUDA_CHECK(cudaMemset(gm->kc_win_pos, 0xff, win_tag_bytes));
+            CUDA_CHECK(cudaMemset(gm->vc_win_pos, 0xff, win_tag_bytes));
+        }
         {
-            const char *attn_mode = getenv("TQ_PACK_ATTN") ? "pack" : "f32-mirror";
-            printf("GPU: TurboQuant KV cache enabled (%zu bytes/layer, %.1fx vs F32, attn=%s)\n",
-                pack_bytes / (size_t)L,
-                (double)(max_seq * kv_dim * sizeof(float))
-                    / (double)(max_seq * cfg->n_kv_heads * GPU_TQ_ENTRY_BYTES),
+            const char *attn_mode = gm->kc ? "f32-mirror" : "pack+win";
+            const double f32_layer = (double)max_seq * kv_dim * sizeof(float) * 2.0;
+            const double pack_layer = (double)(max_seq * cfg->n_kv_heads * pack_per_head);
+            const double win_layer = gm->kc_win ? (double)FA_BR * kv_dim * sizeof(float) * 2.0 : 0.0;
+            printf("GPU: TurboQuant KV (pack %.1fx vs F32, +win %zu B/layer, attn=%s)\n",
+                f32_layer / (pack_layer + win_layer),
+                (size_t)(pack_layer + win_layer) / (size_t)L,
                 attn_mode);
         }
     } else {
@@ -1185,6 +1307,10 @@ GpuModel *gpu_model_create(const GpuConfig *cfg, const GpuWeightsHost *host)
         CUDA_CHECK(cudaMalloc(&gm->vc, (size_t)L * max_seq * kv_dim * sizeof(float)));
         gm->kc_pack = NULL;
         gm->vc_pack = NULL;
+        gm->kc_win = NULL;
+        gm->vc_win = NULL;
+        gm->kc_win_pos = NULL;
+        gm->vc_win_pos = NULL;
     }
 
     gm->h_rope = (float *)malloc((size_t)n_rot * 2 * sizeof(float));
@@ -1238,6 +1364,10 @@ void gpu_model_destroy(GpuModel *gm)
     cudaFree(gm->logits);
     if (gm->kc) cudaFree(gm->kc);
     if (gm->vc) cudaFree(gm->vc);
+    if (gm->kc_win) cudaFree(gm->kc_win);
+    if (gm->vc_win) cudaFree(gm->vc_win);
+    if (gm->kc_win_pos) cudaFree(gm->kc_win_pos);
+    if (gm->vc_win_pos) cudaFree(gm->vc_win_pos);
     if (gm->kc_pack) cudaFree(gm->kc_pack);
     if (gm->vc_pack) cudaFree(gm->vc_pack);
     if (gm->tq_centroids_d) cudaFree(gm->tq_centroids_d);
@@ -1307,23 +1437,29 @@ void gpu_forward(GpuModel *gm, int token, int pos)
             size_t loff = (size_t)l * max_seq * kv_dim;
             kv_tq_compress_kernel<<<n_kv, FA_HD>>>(
                 gm->kc_pack, gm->vc_pack, gm->k, gm->v, pos, l, hd, n_kv, max_seq, tq);
-            float *kc_pos = gm->kc + loff + (size_t)pos * kv_dim;
-            float *vc_pos = gm->vc + loff + (size_t)pos * kv_dim;
-            CUDA_CHECK(cudaMemcpy(kc_pos, gm->k, (size_t)kv_dim * sizeof(float),
-                cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(vc_pos, gm->v, (size_t)kv_dim * sizeof(float),
-                cudaMemcpyDeviceToDevice));
-            if (gpu_tq_pack_attn_decode(l)) {
+            if (gpu_tq_use_pack_attn()) {
+                kv_write_ring_kernel<<<1, 256>>>(gm->kc_win, gm->kc_win_pos, gm->k,
+                    pos, l, kv_dim, FA_BR);
+                kv_write_ring_kernel<<<1, 256>>>(gm->vc_win, gm->vc_win_pos, gm->v,
+                    pos, l, kv_dim, FA_BR);
                 flash_attn_gqa_kernel<<<n_heads, FA_HD>>>(
                     gm->xb, gm->q, NULL, NULL,
                     npos, n_heads, hd, kv_dim, kv_mul, scale,
                     gm->kc_pack, gm->vc_pack, l, max_seq, n_kv, 1,
+                    pos, gm->kc_win, gm->vc_win, gm->kc_win_pos, gm->vc_win_pos,
                     TQ_ATTN_TABLE_ARGS(gm));
             } else {
+                float *kc_pos = gm->kc + loff + (size_t)pos * kv_dim;
+                float *vc_pos = gm->vc + loff + (size_t)pos * kv_dim;
+                CUDA_CHECK(cudaMemcpy(kc_pos, gm->k, (size_t)kv_dim * sizeof(float),
+                    cudaMemcpyDeviceToDevice));
+                CUDA_CHECK(cudaMemcpy(vc_pos, gm->v, (size_t)kv_dim * sizeof(float),
+                    cudaMemcpyDeviceToDevice));
                 flash_attn_gqa_kernel<<<n_heads, FA_HD>>>(
                     gm->xb, gm->q, gm->kc + loff, gm->vc + loff,
                     npos, n_heads, hd, kv_dim, kv_mul, scale,
                     NULL, NULL, l, max_seq, n_kv, 0,
+                    pos, NULL, NULL, NULL, NULL,
                     TQ_ATTN_TABLE_NULL);
             }
         } else {
@@ -1336,6 +1472,7 @@ void gpu_forward(GpuModel *gm, int token, int pos)
                 gm->xb, gm->q, gm->kc + loff, gm->vc + loff,
                 npos, n_heads, hd, kv_dim, kv_mul, scale,
                 NULL, NULL, l, max_seq, n_kv, 0,
+                pos, NULL, NULL, NULL, NULL,
                 TQ_ATTN_TABLE_NULL);
         }
 
@@ -1409,11 +1546,16 @@ void gpu_forward_prefill(GpuModel *gm, const int *tokens, int n_tokens)
             kv_tq_compress_batch_kernel<<<n_tokens * n_kv, FA_HD>>>(
                 gm->kc_pack, gm->vc_pack, gm->k_batch, gm->v_batch,
                 n_tokens, l, hd, kv_dim, n_kv, max_seq, tq);
-            if (gpu_tq_pack_attn_prefill(l)) {
+            if (gpu_tq_use_pack_attn()) {
+                kv_write_ring_batch_kernel<<<n_tokens, 256>>>(
+                    gm->kc_win, gm->kc_win_pos, gm->k_batch, l, kv_dim, FA_BR, n_tokens);
+                kv_write_ring_batch_kernel<<<n_tokens, 256>>>(
+                    gm->vc_win, gm->vc_win_pos, gm->v_batch, l, kv_dim, FA_BR, n_tokens);
                 flash_attn_prefill_gqa_kernel<<<n_tokens * n_heads, FA_HD>>>(
                     gm->xb_batch, gm->q_batch, NULL, NULL,
                     n_tokens, n_heads, hd, kv_dim, kv_mul, scale,
                     gm->kc_pack, gm->vc_pack, l, max_seq, n_kv, 1,
+                    gm->kc_win, gm->vc_win, gm->kc_win_pos, gm->vc_win_pos,
                     TQ_ATTN_TABLE_ARGS(gm));
             } else {
                 kv_write_batch_kernel<<<n_tokens, 256>>>(
@@ -1424,6 +1566,7 @@ void gpu_forward_prefill(GpuModel *gm, const int *tokens, int n_tokens)
                     gm->xb_batch, gm->q_batch, gm->kc + loff, gm->vc + loff,
                     n_tokens, n_heads, hd, kv_dim, kv_mul, scale,
                     NULL, NULL, l, max_seq, n_kv, 0,
+                    NULL, NULL, NULL, NULL,
                     TQ_ATTN_TABLE_NULL);
             }
         } else {
@@ -1436,6 +1579,7 @@ void gpu_forward_prefill(GpuModel *gm, const int *tokens, int n_tokens)
                 gm->xb_batch, gm->q_batch, gm->kc + loff, gm->vc + loff,
                 n_tokens, n_heads, hd, kv_dim, kv_mul, scale,
                 NULL, NULL, l, max_seq, n_kv, 0,
+                NULL, NULL, NULL, NULL,
                 TQ_ATTN_TABLE_NULL);
         }
 

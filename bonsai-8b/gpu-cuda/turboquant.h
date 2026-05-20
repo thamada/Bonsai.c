@@ -42,6 +42,9 @@ void              turboquant_tables_destroy(TurboQuantTables *tq);
 
 void turboquant_compress(const TurboQuantTables *tq, const float *x,
                          TurboQuantPacked *out);
+/* V 用: Lloyd-Max のみ（QJL なし、indices のみ） */
+void turboquant_compress_value(const TurboQuantTables *tq, const float *x,
+                               uint8_t *out_indices);
 float turboquant_inner_product(const TurboQuantTables *tq, const float *query,
                                const TurboQuantPacked *key);
 
