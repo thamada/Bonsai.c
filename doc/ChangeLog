@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 02:16:39
+
+**`README.md` / `README.en.md`**: GPU 参考ベンチマーク表の prefill を **~294 tok/s**（RTX 5090・バッチ prefill・`-p "Hello" -n 16 -t 0` 実測）に更新。旧 **~48 tok/s**（逐次 prefill 時代の参考値）と備考列を削除。
+
+**`doc/design.md`**: GPU ベンチマーク条件表に **表の指標（prefill / decode）** 行を追加。バイナリ表を README 付録と整合（prefill **~294**、備考列なし）。スループット定義に CPU 表／GPU 表の列指標の違いを追記。制約節の prefill **~294** 記載は維持。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 02:04:11
 
 **`README.md` / `README.en.md`**: **本文を CPU 3 バリアントに集約**（ディレクトリツリー・要件・ベンチマークから **`gpu-cuda`** を除外）。**付録**「NVIDIA CUDA 実装（`gpu-cuda`）について」を追加 — 目的外・将来別リポジトリ移行予定の注記、VRAM 配置表、**`generate`** / **`gpu_forward`** / **`gpu_forward_prefill`** の技術メモ（カーネル対応表・Flash Attention・GEMV）、ビルド／実行・GPU ベンチマーク・トラブルシュート。

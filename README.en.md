@@ -530,11 +530,11 @@ CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
 | Workload | Same as CPU table above (prefill 18 + decode 16 tokens) |
 | Build | `gpu-cuda/Makefile` defaults (PTX `compute_86`, `-use_fast_math`) |
 
-| Binary | Prefill tok/s | Decode time | Decode throughput | Notes |
-|---|---:|---:|---:|---|
-| `gpu-cuda/bonsai-gpu-cuda` | ~48 | 0.32 s | **50.24 tok/s** | Prefill **~48 tok/s** is **pre–batch-prefill** reference |
+| Binary | Prefill tok/s | Decode time | Decode throughput |
+|---|---:|---:|---:|
+| `gpu-cuda/bonsai-gpu-cuda` | **~294** | 0.32 s | **50.24 tok/s** |
 
-With the same prompt and `-t 0`, output matched **`cpu-blas`** (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`). `-ffast-math` / `-use_fast_math` can change FP reduction order vs CPU builds; output still matched in this run. See `doc/design.md` for updated prefill benchmarks when re-measured.
+With the same prompt and `-t 0`, output matched **`cpu-blas`** (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`). `-ffast-math` / `-use_fast_math` can change FP reduction order vs CPU builds; output still matched in this run.
 
 ### Troubleshooting (CUDA build)
 

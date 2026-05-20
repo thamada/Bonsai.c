@@ -69,12 +69,14 @@
 | モデル | `Bonsai-8B-Q1_0.gguf`（起動時 VRAM アップロード） |
 | コマンド | `./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
 | ワークロード | 上記 CPU 表と同じ（prefill 18 + decode 16） |
+| 表の指標（prefill） | stderr の `Prefill complete` 行（**`gpu_forward_prefill`** バッチ、`-use_fast_math`） |
+| 表の指標（decode） | decode 時間・tok/s（stderr の `Decode complete` 行） |
 | ビルド | `gpu-cuda/Makefile` 既定（**`-gencode arch=compute_86,code=compute_86`** PTX、ドライバ JIT） |
 | Attention | **Flash Attention + K/V shared staging**（decode: **`flash_attn_gqa_kernel`** `<<<n_heads, FA_HD>>>` / prefill: **`flash_attn_prefill_gqa_kernel`** `<<<n_tokens×n_heads, FA_HD>>>`、因果マスク、shared ≈ 65 KB、carveout=100） |
 
-| バイナリ | prefill tok/s | decode 時間 | decode スループット | 備考 |
-|----------|-------------:|----------:|-----------------:|------|
-| `bonsai-gpu-cuda` | ~48 | 0.32 s | **50.24 tok/s** | decode 指標。prefill **~48 tok/s** はバッチ prefill 導入**前**の参考値（`-use_fast_math`） |
+| バイナリ | prefill tok/s | decode 時間 | decode スループット |
+|----------|-------------:|----------:|-----------------:|
+| `bonsai-gpu-cuda` | **~294** | 0.32 s | **50.24 tok/s** |
 
 同一プロンプト・`-t 0` で **`cpu-blas` と同じ生成テキスト**（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）。この GPU 上では decode が **`cpu-blas`（5950X 参考 30.79 tok/s）の約 1.6 倍**程度。
 
@@ -224,7 +226,7 @@ make build
 - **decode**: トークン数 **`gen`**（サンプリングで出力した数）÷ decode 専用時間（prefill 終了直後〜ループ終了）
 - **total**: **`(n_prompt + gen)`** ÷ 全体 wall time（`generate` 開始〜終了）
 
-参考ベンチマーク表の tok/s は **decode 区間**（`Decode complete` 行）の tok/s。prefill / total は CLI の `--- throughput ---` で別途確認する。
+参考ベンチマーク表: **CPU 表**は **decode 区間**（`Decode complete` 行）のみ。**GPU 表**は prefill 列が **`Prefill complete` 行**、decode 列が **`Decode complete` 行**。prefill / decode / total の 3 値はいずれも CLI の `--- throughput ---` でも確認できる。
 
 **`gpu-cuda`** の prefill は **`gpu_forward_prefill`** による**一括バッチ**のため、プログレスバーは **0% 表示のあと完了時に一気に 100%** となる（CPU 3 バリアントのトークン逐次更新とは異なる）。prefill 時間・tok/s の定義は上記と同じ（バッチ全体の wall time ÷ **`n_prompt`**）。
 
@@ -348,7 +350,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（参考 decode **30.79 tok/s**）を推奨。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。
-- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 decode **~50 tok/s**（prefill 再計測前の参考値あり）。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**。**VRAM** に prefill バッチ（**`max_seq` 分**）含む。**Flash Attention** shared ≈ 65 KB/ブロック・**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
+- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s**（バッチ prefill）、decode **~50 tok/s**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**。**VRAM** に prefill バッチ（**`max_seq` 分**）含む。**Flash Attention** shared ≈ 65 KB/ブロック・**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。
