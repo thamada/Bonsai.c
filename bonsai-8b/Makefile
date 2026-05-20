@@ -17,33 +17,33 @@ PROMPT  ?= Hello, how are you?
 # GGUF モデル（gguf.txt の URL からダウンロード）
 model:
 	@if [ ! -f "$(MODEL).sha256sum" ]; then \
-		echo "エラー: チェックサムファイル '$(MODEL).sha256sum' が見つかりません。"; \
-		echo "リポジトリを最新版に更新するか、ファイルが存在するか確認してください。"; \
+		echo "Error: checksum file '$(MODEL).sha256sum' not found."; \
+		echo "Update the repository to the latest version, or verify the file exists."; \
 		exit 1; \
 	fi; \
 	url=$$(sed 's|/blob/main/|/resolve/main/|' gguf.txt); \
 	wget -O "$(MODEL)" "$$url" && \
 	if sha256sum --check "$(MODEL).sha256sum"; then \
 		echo ""; \
-		echo "チェックサム検証に成功しました。"; \
+		echo "Checksum verification succeeded."; \
 		echo ""; \
-		echo "  ファイル: $(MODEL)"; \
-		echo "  参照:     $(MODEL).sha256sum"; \
+		echo "  File:     $(MODEL)"; \
+		echo "  Expected: $(MODEL).sha256sum"; \
 		echo ""; \
-		echo "モデルのダウンロードと検証が完了しました。"; \
+		echo "Model download and verification complete."; \
 		echo "  make run.cpu"; \
-		echo "などで推論を実行できます。"; \
+		echo "or similar to run inference."; \
 	else \
 		echo ""; \
-		echo "エラー: ダウンロードしたモデルファイルのチェックサム検証に失敗しました。"; \
+		echo "Error: checksum verification failed for the downloaded model file."; \
 		echo ""; \
-		echo "  ファイル: $(MODEL)"; \
-		echo "  参照:     $(MODEL).sha256sum"; \
+		echo "  File:     $(MODEL)"; \
+		echo "  Expected: $(MODEL).sha256sum"; \
 		echo ""; \
-		echo "ダウンロード中にファイルが破損した可能性があります。"; \
-		echo "破損したファイルを削除します。ネットワーク接続を確認してから"; \
+		echo "The file may have been corrupted during download."; \
+		echo "Removing the corrupted file. Check your network connection, then run"; \
 		echo "  make model"; \
-		echo "を再実行してください。"; \
+		echo "again."; \
 		rm -f "$(MODEL)"; \
 		exit 1; \
 	fi

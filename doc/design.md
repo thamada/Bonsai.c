@@ -246,7 +246,7 @@ GPT-2 系 BPE と特殊トークン。**3 バリアント共通**の **`chat_enc
 
 - 既定ファイル名: **`bonsai-8b/Makefile` の `MODEL`**（既定 **`Bonsai-8B-Q1_0.gguf`**）。
 - 取得 URL: **`bonsai-8b/gguf.txt`**（Hugging Face の `blob/main` URL。`make model` は `resolve/main` に置換して `wget` する）。
-- チェックサム: **`bonsai-8b/$(MODEL).sha256sum`**（既定 **`Bonsai-8B-Q1_0.gguf.sha256sum`**）。`make model` はダウンロード後に **`sha256sum --check`** で照合し、失敗時は破損ファイルを削除してエラーメッセージを表示する。
+- チェックサム: **`bonsai-8b/$(MODEL).sha256sum`**（既定 **`Bonsai-8B-Q1_0.gguf.sha256sum`**）。`make model` はダウンロード後に **`sha256sum --check`** で照合し、成功・失敗いずれも**英語**のメッセージを表示する。失敗時は破損ファイルを削除する。
 - 手動取得: README の手順どおり `gguf.txt` から URL を変換して `wget` し、同 `.sha256sum` で検証してもよい。
 
 ## 制約・既知の制限
