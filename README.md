@@ -13,7 +13,8 @@
 **PyTorch・TensorFlow・JAX・ONNX Runtime など、機械学習向けのユーザランドライブラリ／ランタイムは一切リンクしていません。**  
 推論の基準経路は **標準Cと `libm`** のみで、`bonsai-8b/cpu/main.c` から **CPU 単スレッド**の実行ファイル（`bonsai-cpu`）をビルドします。  
 より速い検証向けに、同じ GGUF に対応した **OpenMP マルチスレッド**版を `bonsai-8b/cpu-omp/main.c` から **`bonsai-cpu-omp`** として別ビルドできます（ランタイムは **標準C + `libm` + OpenMP ランタイム**）。  
-さらに **`bonsai-8b/cpu-blas/`** では **OpenMP + OpenBLAS** と **Q1_0 専用の融合内積カーネル**で **`bonsai-cpu-blas`** をビルドできます（**標準C + `libm` + OpenMP + OpenBLAS**）。Python や `torch` には依存しません。
+さらに **`bonsai-8b/cpu-blas/`** では **OpenMP + OpenBLAS** と **Q1_0 専用の融合内積カーネル**で **`bonsai-cpu-blas`** をビルドできます（**標準C + `libm` + OpenMP + OpenBLAS**）。  
+**NVIDIA GPU** 向けには **`bonsai-8b/gpu-cuda/`**（**`main.c`** + **`kernels.cu`** → **`bonsai-gpu-cuda`**）があり、重みと KV を VRAM に載せ **CUDA カーネル**（Flash Attention 含む）で forward します（**CUDA Runtime のみ、`libcudart`**）。Python や `torch` には依存しません。
 
 ### なぜライブラリ非依存なのか
 
@@ -30,15 +31,16 @@
 
 ## まず何ができるのか
 
-**CPU 単スレッド**版、その **OpenMP** 並列版、および **OpenMP + OpenBLAS** 最適化版の 3 通りがあります。
+**CPU 単スレッド**版、その **OpenMP** 並列版、**OpenMP + OpenBLAS** 最適化版、および **NVIDIA GPU CUDA** 版の 4 通りがあります。
 
 | 実行方法 | 使うファイル | 作られる実行ファイル | 向いている用途 |
 |---|---|---|---|
 | CPU 単スレッド | `bonsai-8b/cpu/main.c` | `cpu/bonsai-cpu` | 仕組みを追う、最小依存で動かす |
 | CPU + OpenMP | `bonsai-8b/cpu-omp/main.c` | `cpu-omp/bonsai-cpu-omp` | マルチコアでの試運転（参照用） |
-| CPU + OpenMP + OpenBLAS | `bonsai-8b/cpu-blas/main.c` | `cpu-blas/bonsai-cpu-blas` | マルチコアでの実用的なスループット（推奨） |
+| CPU + OpenMP + OpenBLAS | `bonsai-8b/cpu-blas/main.c` | `cpu-blas/bonsai-cpu-blas` | マルチコアでの実用的なスループット（CPU 推奨） |
+| GPU + CUDA | `bonsai-8b/gpu-cuda/main.c` + `kernels.cu` | `gpu-cuda/bonsai-gpu-cuda` | NVIDIA GPU での高速推論（GPU 推奨） |
 
-8B 級モデルの CPU 実行は依然として **重い**です。まずは `-n 1` など短い生成で動作確認し、本番試行は **`cpu-blas`** を推奨します（下記 [参考ベンチマーク](#参考ベンチマーク)）。
+8B 級モデルの CPU 実行は依然として **重い**です。まずは `-n 1` など短い生成で動作確認し、CPU 本番試行は **`cpu-blas`**、NVIDIA GPU が使える環境では **`gpu-cuda`** を推奨します（下記 [参考ベンチマーク](#参考ベンチマーク)）。
 
 ## ディレクトリ構成
 
@@ -59,12 +61,17 @@
     ├── cpu-omp/
     │   ├── Makefile
     │   └── main.c
-    └── cpu-blas/
+    ├── cpu-blas/
+    │   ├── Makefile
+    │   └── main.c
+    └── gpu-cuda/
         ├── Makefile
-        └── main.c
+        ├── main.c
+        ├── kernels.cu
+        └── gpu.h
 ```
 
-推論コードは **`bonsai-8b/cpu/`**（参照・単スレッド）が基準です。並列版は **`bonsai-8b/cpu-omp/`**、最適化版は **`bonsai-8b/cpu-blas/`** です。
+推論コードは **`bonsai-8b/cpu/`**（参照・単スレッド）が基準です。並列版は **`bonsai-8b/cpu-omp/`**、CPU 最適化版は **`bonsai-8b/cpu-blas/`**、GPU 版は **`bonsai-8b/gpu-cuda/`** です。
 
 ## 初心者向け: LLM推論で何が起きるか
 
@@ -84,6 +91,7 @@
 - `libm`  
 - **`cpu-omp`** をビルドするときは **OpenMP に対応したコンパイラ**（GCC / Clang と通常同梱の OpenMP ランタイム、`libgomp` または `libomp`）  
 - **`cpu-blas`** をビルドするときは上記に加え **OpenBLAS**（例: Debian/Ubuntu では `libopenblas-dev`）  
+- **`gpu-cuda`** をビルドするときは **CUDA Toolkit**（**`nvcc`**）と **NVIDIA ドライバ**（**`libcudart`**。cuBLAS 不要）  
 - **`wget`**（`make model` で GGUF を取得するとき）  
 - **Bonsai-8B-Q1_0.gguf**（[prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)。`make model` で取得）
 
@@ -92,6 +100,8 @@ sudo apt update
 sudo apt install -y build-essential make
 # cpu-blas を使う場合:
 # sudo apt install -y libopenblas-dev
+# gpu-cuda を使う場合:
+# sudo apt install -y nvidia-cuda-toolkit   # または NVIDIA 公式 CUDA Toolkit
 ```
 
 ## モデルファイルを置く
@@ -122,6 +132,7 @@ bonsai-8b/
 ├── cpu/ … （`main.c` → `bonsai-cpu`）
 ├── cpu-omp/ … （`main.c` → `bonsai-cpu-omp`）
 ├── cpu-blas/ … （`main.c` → `bonsai-cpu-blas`）
+├── gpu-cuda/ … （`main.c` + `kernels.cu` → `bonsai-gpu-cuda`）
 └── Bonsai-8B-Q1_0.gguf
 ```
 
@@ -142,6 +153,14 @@ make build.cpu
 cd bonsai-8b/cpu-omp
 make build
 ./bonsai-cpu-omp ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
+```
+
+NVIDIA GPU 版（任意）:
+
+```bash
+cd bonsai-8b
+make build.gpu-cuda
+./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
 
 ## CPU 単スレッド版
@@ -233,13 +252,46 @@ cd bonsai-8b
 make run.cpu-blas PROMPT="Hello"
 ```
 
+## GPU CUDA 版（`gpu-cuda`、NVIDIA GPU 推奨）
+
+`cpu-blas` と同じ GGUF・CLI を前提に、起動時に重み・KV・活性化を **VRAM** に載せ、**CUDA カーネル**で forward します。**Q1_0 GEMV** は Q8_0 活性化 + 専用カーネル、**Attention** は **Flash Attention 風 online softmax**（中間 `att` 行列を展開しない）。サンプリングのみ CPU（logits の D2H コピー）。
+
+### ビルド
+
+```bash
+sudo apt install -y nvidia-cuda-toolkit   # 未導入の場合（または NVIDIA 公式 CUDA Toolkit）
+cd bonsai-8b/gpu-cuda
+make build
+```
+
+成功すると **`bonsai-gpu-cuda`** がこのディレクトリにできます。`bonsai-8b/Makefile` からは `make build.gpu-cuda` / `make run.gpu-cuda` でもビルド・実行できます。
+
+GPU アーキテクチャに合わせ **`CUDA_GENCODE`** を上書きできます（既定は PTX `compute_86` + ドライバ JIT）:
+
+```bash
+make build CUDA_GENCODE=arch=compute_90,code=sm_90
+```
+
+### 実行
+
+```bash
+cd bonsai-8b/gpu-cuda
+./bonsai-gpu-cuda ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+```bash
+cd bonsai-8b
+make run.gpu-cuda PROMPT="Hello"
+```
+
 ## 参考ベンチマーク
 
-以下は **開発環境での参考値**です。CPU・メモリ・ビルドフラグ・GGUF が RAM にあるかで大きく変わります。再現時は同じ GGUF・同じコマンドで計測してください。
+以下は **開発環境での参考値**です。CPU・GPU・メモリ・ビルドフラグ・GGUF の配置で大きく変わります。再現時は同じ GGUF・同じコマンドで計測してください。
+
+### CPU（2026-05-19）
 
 | 項目 | 値 |
 |---|---|
-| 日付 | 2026-05-19 |
 | CPU | AMD Ryzen 9 5950X（32 論理コア） |
 | OS | Linux |
 | モデル | `Bonsai-8B-Q1_0.gguf` (pre-read, in RAM) |
@@ -255,7 +307,24 @@ make run.cpu-blas PROMPT="Hello"
 | `cpu-omp/bonsai-cpu-omp` | 3.2 s | **4.94 tok/s** | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
 | `cpu-blas/bonsai-cpu-blas` | 0.5 s | **30.79 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
 
-この条件下では **`cpu-blas` が `cpu-omp` の約 6 倍**、**`cpu` の約 128 倍**の decode スループットでした（`cpu-omp` は `cpu` の約 21 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致しています。`-ffast-math` により浮動小数の結合順は `cpu-omp` と異なり得ますが、上記試行では同一出力でした。
+この条件下では **`cpu-blas` が `cpu-omp` の約 6 倍**、**`cpu` の約 128 倍**の decode スループットでした（`cpu-omp` は `cpu` の約 21 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致しています。
+
+### GPU CUDA（2026-05-21）
+
+| 項目 | 値 |
+|---|---|
+| GPU | NVIDIA GeForce RTX 5090（31 GiB VRAM） |
+| OS | Linux |
+| モデル | `Bonsai-8B-Q1_0.gguf`（起動時 VRAM アップロード） |
+| コマンド | `./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
+| ワークロード | 上記 CPU 表と同じ |
+| ビルド | `gpu-cuda/Makefile` 既定（PTX `compute_86`、`-use_fast_math`） |
+
+| バイナリ | prefill tok/s | decode 時間 | decode スループット | 備考 |
+|---|---:|---:|---:|---|
+| `gpu-cuda/bonsai-gpu-cuda` | ~48 | 0.32 s | **50.24 tok/s** | Flash Attention 実装 |
+
+同一プロンプト・`-t 0` で **`cpu-blas` と同じ生成テキスト**（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）。`-ffast-math` / `-use_fast_math` により浮動小数の結合順は CPU 版と異なり得ますが、上記試行では同一出力でした。
 
 ## よく使うオプション
 
@@ -284,6 +353,12 @@ OpenBLAS 版も同様です。
 ./cpu-blas/bonsai-cpu-blas Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
 ```
 
+GPU CUDA 版も同様です。
+
+```bash
+./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
+```
+
 ## 生成を安定させたいとき
 
 ```bash
@@ -301,7 +376,7 @@ cd bonsai-8b
 make clean
 ```
 
-ルートで `make clean` すると **`cpu/bonsai-cpu`** と **`cpu-blas/bonsai-cpu-blas`** が削除されます。**`cpu-omp/bonsai-cpu-omp`** を消すときは `bonsai-8b/cpu-omp` で `make clean` してください。GGUF は削除されません。
+ルートで `make clean` すると **`cpu/bonsai-cpu`**、**`cpu-blas/bonsai-cpu-blas`**、**`gpu-cuda/bonsai-gpu-cuda`** が削除されます。**`cpu-omp/bonsai-cpu-omp`** を消すときは `bonsai-8b/cpu-omp` で `make clean` してください。GGUF は削除されません。
 
 ## よくあるトラブル
 
@@ -320,7 +395,7 @@ cd bonsai-8b && make model
 
 ### CPU 版が遅い
 
-正常です。8B を CPU で回す負荷は大きいです。`-n 1` や `-n 4` から試すか、**`cpu-blas`**（`libopenblas-dev` 要）を使ってください。`cpu-omp` のみの場合は **`OMP_NUM_THREADS`** を調整してください。
+正常です。8B を CPU で回す負荷は大きいです。`-n 1` や `-n 4` から試すか、**`cpu-blas`**（`libopenblas-dev` 要）を使ってください。NVIDIA GPU がある場合は **`gpu-cuda`** を試してください。`cpu-omp` のみの場合は **`OMP_NUM_THREADS`** を調整してください。
 
 ```bash
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
@@ -334,6 +409,10 @@ cd bonsai-8b && make model
 
 `libopenblas-dev`（またはディストリビューション相当）をインストールし、`cpu-blas` で `make build` を再実行してください。ヘッダが非標準パスの場合は `cpu-blas/Makefile` のコメントを参照し `CPPFLAGS` で `-I` を指定します。
 
+### CUDA / `nvcc` が見つからない（`gpu-cuda`）
+
+CUDA Toolkit（**`nvcc`**）と NVIDIA ドライバをインストールし、`gpu-cuda` で `make build` を再実行してください。古い CUDA では `-arch=native` が使えないため、既定は PTX（`compute_86`）+ ドライバ JIT です。GPU に合わせ `CUDA_GENCODE` を指定してください（`gpu-cuda/Makefile` 参照）。
+
 ## 実装を読みたい人へ
 
 1. `README.md` / `README.en.md`  
@@ -341,11 +420,13 @@ cd bonsai-8b && make model
 3. `bonsai-8b/cpu/main.c` — 単スレッド基準経路  
 4. `bonsai-8b/cpu-omp/main.c` — OpenMP 並列版  
 5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + Q1_0 融合カーネル  
+6. `bonsai-8b/gpu-cuda/main.c` — ホスト側（GGUF・トークナイザ・サンプリング）  
+7. `bonsai-8b/gpu-cuda/kernels.cu` — CUDA カーネル（Flash Attention 等）  
 
 ## このリポジトリで扱わないもの
 
 - 学習・ファインチューニング  
-- **GPU / NPU** や **CUDA / Vulkan / Metal** など GPU ランタイム向けビルド  
+- **ROCm/HIP・AMD NPU** や **Vulkan / Metal** など NVIDIA CUDA 以外の GPU ランタイム  
 - バッチ推論の最適化  
 - 画像入力  
 - サーバ化・Web API 化  
@@ -359,4 +440,4 @@ cd bonsai-8b && make model
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-困ったときは、`bonsai-8b/Makefile`（`model` / `build.cpu` / `build.cpu-blas` / `run.cpu-blas` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。
+困ったときは、`bonsai-8b/Makefile`（`model` / `build.cpu` / `build.cpu-blas` / `build.gpu-cuda` / `run.cpu-blas` / `run.gpu-cuda` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。

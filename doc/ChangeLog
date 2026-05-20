@@ -4,6 +4,30 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 01:24:04
+
+**`doc/design.md`**: **`gpu-cuda`** 節を実装と最終整合（**`main.c`** / **`kernels.cu`** の **`cc`** / **`nvcc`** 分割ビルド、起動時 **`gpu_print_device_info()`**、mmap 寿命、Flash Attention の **`<<<n_heads, FA_HD>>>`** 表記）。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-21 01:13:46
+
+**`README.md` / `README.en.md`**: **`gpu-cuda`** バリアントを追記（実行方法表・ディレクトリ構成・要件・ビルド／実行手順・GPU 参考ベンチマーク・CLI 例・トラブルシュート・コードベース案内）。「扱わないもの」から NVIDIA CUDA を除外し ROCm/NPU 等のみ記載。**`make build.gpu-cuda`** / **`run.gpu-cuda`** を反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-21 01:12:18
+
+**`bonsai-8b/gpu-cuda/`**（新規）: **`cpu-blas`** をベースに NVIDIA GPU 向け推論バリアントを追加。**`main.c`**（ホスト: GGUF・トークナイザ・サンプリング）、**`kernels.cu`**（CUDA カーネル）、**`gpu.h`**（C API）、**`Makefile`**（**`nvcc`**、**`-lcudart`**、既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**）。起動時に重み・KV・活性化を VRAM 常駐。**Q1_0 GEMV** は Q8_0 活性化 + **`vec_dot_q1_0_q8_0`** CUDA カーネル。**Attention** は **Flash Attention 風 online softmax**（**`flash_attn_gqa_kernel`**、**`FA_BR=64`** タイル、**`att` 非物質化**、GQA 対応）。cuBLAS 非依存。
+
+**`bonsai-8b/Makefile`**: **`build.gpu-cuda`** / **`run.gpu-cuda`** ターゲット追加。**`clean`** に **`gpu-cuda`** を委譲。
+
+**`.gitignore`**: **`bonsai-8b/gpu-cuda/bonsai-gpu-cuda`** を追加。
+
+**`doc/design.md`**: **`gpu-cuda`** バリアント・ディレクトリ表・Make ターゲット・ビルド手順・実行挙動（Flash Attention）・GPU 参考ベンチマーク（RTX 5090、decode **50.24 tok/s**）・制約を追記。CPU 参考ベンチマーク表の数値を README 整合値に更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-20 23:43:09
 
 **`README.md` / `README.en.md`**: モデル取得の主手順を **`make model`** に更新（**`Bonsai-8B-Q1_0.gguf.sha256sum`** による SHA256 自動検証を説明）。**`wget`** を必要環境に追加。手動 **`wget`** + **`sha256sum --check`** を代替手順として残す。ディレクトリ構成に **`.sha256sum`** を追記。クイックスタートの先頭に **`make model`** を追加。モデル未配置時のトラブルシュートと **`bonsai-8b/Makefile`** の **`model`** ターゲット参照を追記。

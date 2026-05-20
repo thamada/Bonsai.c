@@ -9,6 +9,7 @@ PROMPT  ?= Hello, how are you?
 	model \
 	build.cpu run.cpu \
 	build.cpu-blas run.cpu-blas \
+	build.gpu-cuda run.gpu-cuda \
 	clean
 
 .DEFAULT_GOAL := all
@@ -65,9 +66,18 @@ run.cpu-blas: build.cpu-blas
 	./cpu-blas/bonsai-cpu-blas "$(MODEL)" -p "$(PROMPT)"
 
 # -----------------------------------------------------------------------------
+# GPU CUDA + cuBLAS（ソースは gpu-cuda/main.c + kernels.cu）
+build.gpu-cuda:
+	cd gpu-cuda && make build
+
+run.gpu-cuda: build.gpu-cuda
+	./gpu-cuda/bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
+
+# -----------------------------------------------------------------------------
 all: build.cpu
 
 # -----------------------------------------------------------------------------
 clean:
 	cd cpu && make clean
 	cd cpu-blas && make clean
+	cd gpu-cuda && make clean

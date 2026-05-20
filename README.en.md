@@ -13,7 +13,8 @@ Per [Announcing 1-bit Bonsai: The First Commercially Viable 1-bit LLMs](https://
 **This project does not link PyTorch, TensorFlow, JAX, ONNX Runtime, or other ML userland libraries.**
 
 The primary path uses **standard C and `libm` only**, built from **`bonsai-8b/cpu/main.c`** into a **single-threaded CPU** binary (`bonsai-cpu`). For faster experimentation on multicore CPUs, **`bonsai-8b/cpu-omp/main.c`** builds **`bonsai-cpu-omp`**, parallelized with **OpenMP** (**standard C + `libm` + OpenMP runtime**).  
-For practical throughput on **`Bonsai-8B-Q1_0`**, **`bonsai-8b/cpu-blas/`** builds **`bonsai-cpu-blas`** with **OpenMP + OpenBLAS** and a **fused Q1_0 dot-product kernel** (**standard C + `libm` + OpenMP + OpenBLAS**). There is no Python or `torch` dependency.
+For practical throughput on **`Bonsai-8B-Q1_0`**, **`bonsai-8b/cpu-blas/`** builds **`bonsai-cpu-blas`** with **OpenMP + OpenBLAS** and a **fused Q1_0 dot-product kernel** (**standard C + `libm` + OpenMP + OpenBLAS**).  
+For **NVIDIA GPUs**, **`bonsai-8b/gpu-cuda/`** (**`main.c`** + **`kernels.cu`** → **`bonsai-gpu-cuda`**) keeps weights and KV in VRAM and runs the forward pass with **CUDA kernels** (including Flash Attention), linking **CUDA Runtime only (`libcudart`)**. There is no Python or `torch` dependency.
 
 ### Why avoid ML libraries?
 
@@ -27,15 +28,16 @@ This is **not** aimed at peak performance or full feature parity.
 
 ## What you can run
 
-You get a **single-thread CPU** reference build, an **OpenMP multicore** build, and an **OpenMP + OpenBLAS** optimized build.
+You get a **single-thread CPU** reference build, an **OpenMP multicore** build, an **OpenMP + OpenBLAS** optimized build, and an **NVIDIA GPU CUDA** build.
 
 | Mode | Source | Binary | Good for |
 |---|---|---|---|
 | CPU single-thread | `bonsai-8b/cpu/main.c` | `cpu/bonsai-cpu` | Learning the flow, minimal dependencies |
 | CPU + OpenMP | `bonsai-8b/cpu-omp/main.c` | `cpu-omp/bonsai-cpu-omp` | Multicore smoke tests (reference) |
-| CPU + OpenMP + OpenBLAS | `bonsai-8b/cpu-blas/main.c` | `cpu-blas/bonsai-cpu-blas` | Practical multicore throughput (**recommended**) |
+| CPU + OpenMP + OpenBLAS | `bonsai-8b/cpu-blas/main.c` | `cpu-blas/bonsai-cpu-blas` | Practical multicore throughput (**CPU recommended**) |
+| GPU + CUDA | `bonsai-8b/gpu-cuda/main.c` + `kernels.cu` | `gpu-cuda/bonsai-gpu-cuda` | Fast inference on NVIDIA GPUs (**GPU recommended**) |
 
-An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for smoke tests; for longer runs prefer **`cpu-blas`** (see [Reference benchmark](#reference-benchmark) below).
+An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for smoke tests; for longer CPU runs prefer **`cpu-blas`**, and on NVIDIA hardware prefer **`gpu-cuda`** (see [Reference benchmark](#reference-benchmark) below).
 
 ## Repository layout
 
@@ -56,12 +58,17 @@ An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for sm
     ├── cpu-omp/
     │   ├── Makefile
     │   └── main.c
-    └── cpu-blas/
+    ├── cpu-blas/
+    │   ├── Makefile
+    │   └── main.c
+    └── gpu-cuda/
         ├── Makefile
-        └── main.c
+        ├── main.c
+        ├── kernels.cu
+        └── gpu.h
 ```
 
-The reference decoder path lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the optimized build is **`bonsai-8b/cpu-blas/`**.
+The reference decoder path lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the CPU optimized build is **`bonsai-8b/cpu-blas/`**; the GPU build is **`bonsai-8b/gpu-cuda/`**.
 
 ## Beginners: what happens during LLM inference?
 
@@ -83,6 +90,7 @@ Here, that pipeline is **not** inside PyTorch; you can follow it **in the C sour
 - `libm`  
 - For **`cpu-omp`**, a compiler/toolchain with **OpenMP** (`libgomp` or `libomp`, commonly bundled with GCC/Clang)  
 - For **`cpu-blas`**, the above plus **OpenBLAS** (e.g. `libopenblas-dev` on Debian/Ubuntu)  
+- For **`gpu-cuda`**, **CUDA Toolkit** (**`nvcc`**) and an **NVIDIA driver** (**`libcudart`** only; cuBLAS not required)  
 - **`wget`** (for `make model` to fetch the GGUF)  
 - **`Bonsai-8B-Q1_0.gguf`** from [prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf) (via `make model`)
 
@@ -93,6 +101,8 @@ sudo apt update
 sudo apt install -y build-essential make
 # For cpu-blas:
 # sudo apt install -y libopenblas-dev
+# For gpu-cuda:
+# sudo apt install -y nvidia-cuda-toolkit   # or NVIDIA’s official CUDA Toolkit
 ```
 
 ## Obtain the model file
@@ -123,6 +133,7 @@ bonsai-8b/
 ├── cpu/ … (`main.c` → `bonsai-cpu`)
 ├── cpu-omp/ … (`main.c` → `bonsai-cpu-omp`)
 ├── cpu-blas/ … (`main.c` → `bonsai-cpu-blas`)
+├── gpu-cuda/ … (`main.c` + `kernels.cu` → `bonsai-gpu-cuda`)
 └── Bonsai-8B-Q1_0.gguf
 ```
 
@@ -143,6 +154,14 @@ make build.cpu
 cd bonsai-8b/cpu-omp
 make build
 ./bonsai-cpu-omp ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
+```
+
+(Optional) NVIDIA GPU build:
+
+```bash
+cd bonsai-8b
+make build.gpu-cuda
+./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
 
 ## Build & run (CPU)
@@ -236,13 +255,46 @@ cd bonsai-8b
 make run.cpu-blas PROMPT="Hello"
 ```
 
+## Build & run (GPU + CUDA, `gpu-cuda`, NVIDIA recommended)
+
+Same GGUF and CLI as **`cpu-blas`**. Weights, KV cache, and activations are uploaded to **VRAM** at startup; the forward pass runs in **CUDA kernels**. **Q1_0 GEMV** uses Q8_0 activation plus a dedicated kernel; **attention** uses **Flash Attention–style online softmax** (no materialized `att` matrix). Sampling stays on the CPU (logits copied D2H).
+
+### Build
+
+```bash
+sudo apt install -y nvidia-cuda-toolkit   # if needed (or NVIDIA’s official CUDA Toolkit)
+cd bonsai-8b/gpu-cuda
+make build
+```
+
+Produces **`bonsai-gpu-cuda`**. From `bonsai-8b/`: `make build.gpu-cuda` / `make run.gpu-cuda`.
+
+Override **`CUDA_GENCODE`** for your GPU (default: PTX `compute_86` + driver JIT):
+
+```bash
+make build CUDA_GENCODE=arch=compute_90,code=sm_90
+```
+
+### Run
+
+```bash
+cd bonsai-8b/gpu-cuda
+./bonsai-gpu-cuda ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+```bash
+cd bonsai-8b
+make run.gpu-cuda PROMPT="Hello"
+```
+
 ## Reference benchmark
 
-**Reference numbers from one development machine**—your results will vary with CPU, memory, compiler flags, and whether the GGUF is already in RAM. Re-run with the same GGUF and command to compare.
+**Reference numbers from development machines**—your results will vary with CPU, GPU, memory, compiler flags, and model placement. Re-run with the same GGUF and command to compare.
+
+### CPU (2026-05-19)
 
 | Item | Value |
 |---|---|
-| Date | 2026-05-19 |
 | CPU | AMD Ryzen 9 5950X (32 logical cores) |
 | OS | Linux |
 | Model | `Bonsai-8B-Q1_0.gguf` (pre-read, in RAM) |
@@ -258,7 +310,24 @@ make run.cpu-blas PROMPT="Hello"
 | `cpu-omp/bonsai-cpu-omp` | 3.2 s | **4.94 tok/s** | `-O3 -fopenmp` (`cpu-omp/Makefile` defaults) |
 | `cpu-blas/bonsai-cpu-blas` | 0.5 s | **30.79 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`, OpenBLAS at 1 thread |
 
-Under these conditions, **`cpu-blas` was about 6× faster than `cpu-omp`** and **about 128× faster than `cpu`** (`cpu-omp` was about 21× faster than `cpu`). Generated text (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`) matched on all three binaries. `-ffast-math` allows different FP reduction order than `cpu-omp`; output still matched in this run.
+Under these conditions, **`cpu-blas` was about 6× faster than `cpu-omp`** and **about 128× faster than `cpu`** (`cpu-omp` was about 21× faster than `cpu`). Generated text (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`) matched on all three CPU binaries.
+
+### GPU CUDA (2026-05-21)
+
+| Item | Value |
+|---|---|
+| GPU | NVIDIA GeForce RTX 5090 (31 GiB VRAM) |
+| OS | Linux |
+| Model | `Bonsai-8B-Q1_0.gguf` (uploaded to VRAM at startup) |
+| Command | `./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 16 -t 0` |
+| Workload | Same as the CPU table above |
+| Build | `gpu-cuda/Makefile` defaults (PTX `compute_86`, `-use_fast_math`) |
+
+| Binary | Prefill tok/s | Decode time | Decode throughput | Notes |
+|---|---:|---:|---:|---|
+| `gpu-cuda/bonsai-gpu-cuda` | ~48 | 0.32 s | **50.24 tok/s** | Flash Attention |
+
+With the same prompt and `-t 0`, output matched **`cpu-blas`** (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`). `-ffast-math` / `-use_fast_math` can change FP reduction order vs CPU builds; output still matched in this run.
 
 ## Common CLI options
 
@@ -289,6 +358,12 @@ The OpenBLAS build as well:
 ./cpu-blas/bonsai-cpu-blas Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
 ```
 
+The GPU CUDA build accepts the same flags:
+
+```bash
+./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
+```
+
 ## More deterministic output
 
 ```bash
@@ -306,7 +381,7 @@ cd bonsai-8b
 make clean
 ```
 
-`make clean` at `bonsai-8b/` removes **`cpu/bonsai-cpu`** and **`cpu-blas/bonsai-cpu-blas`**. To remove **`cpu-omp/bonsai-cpu-omp`**, run `make clean` inside **`bonsai-8b/cpu-omp`**. The GGUF file is **not** deleted.
+`make clean` at `bonsai-8b/` removes **`cpu/bonsai-cpu`**, **`cpu-blas/bonsai-cpu-blas`**, and **`gpu-cuda/bonsai-gpu-cuda`**. To remove **`cpu-omp/bonsai-cpu-omp`**, run `make clean` inside **`bonsai-8b/cpu-omp`**. The GGUF file is **not** deleted.
 
 ## Troubleshooting
 
@@ -325,7 +400,7 @@ cd bonsai-8b && make model
 
 ### CPU is slow
 
-Expected for an 8B model on CPU. Try `-n 1` or `-n 4`, or use **`cpu-blas`** (requires `libopenblas-dev`). With **`cpu-omp`** only, tune **`OMP_NUM_THREADS`**:
+Expected for an 8B model on CPU. Try `-n 1` or `-n 4`, or use **`cpu-blas`** (requires `libopenblas-dev`). On NVIDIA hardware, try **`gpu-cuda`**. With **`cpu-omp`** only, tune **`OMP_NUM_THREADS`**:
 
 ```bash
 ./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
@@ -339,6 +414,10 @@ Install an OpenMP-capable toolchain and runtime (`libgomp` / `libomp` per distro
 
 Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-blas`**. If headers live off the default path, see comments in **`cpu-blas/Makefile`** and set `CPPFLAGS` with `-I`.
 
+### CUDA / `nvcc` not found (`gpu-cuda`)
+
+Install CUDA Toolkit (**`nvcc`**) and an NVIDIA driver, then rebuild in **`gpu-cuda`**. Older CUDA releases may not support `-arch=native`; the default builds PTX (`compute_86`) for driver JIT. Set **`CUDA_GENCODE`** for your GPU (see **`gpu-cuda/Makefile`**).
+
 ## Reading the codebase
 
 1. `README.en.md` / `README.md` — build and run  
@@ -346,11 +425,13 @@ Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-
 3. `bonsai-8b/cpu/main.c` — GGUF load through one-token generation (single-thread baseline)  
 4. `bonsai-8b/cpu-omp/main.c` — OpenMP parallel variant  
 5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + fused Q1_0 kernel  
+6. `bonsai-8b/gpu-cuda/main.c` — host side (GGUF, tokenizer, sampling)  
+7. `bonsai-8b/gpu-cuda/kernels.cu` — CUDA kernels (Flash Attention, etc.)  
 
 ## Out of scope
 
 - Training / fine-tuning  
-- GPU / NPU stacks (CUDA, Vulkan compute, Metal, …) — no GPU build targets here  
+- **ROCm/HIP, AMD NPU**, **Vulkan compute, Metal**, and other non–NVIDIA-CUDA GPU stacks  
 - Batch inference tuning  
 - Image input  
 - Server or Web API packaging  
@@ -364,4 +445,4 @@ The goal is to **understand, experiment with, and adapt** **Bonsai-8B-Q1_0** (GG
 - Design: `doc/design.md`  
 - Changelog: `doc/ChangeLog`  
 
-If something fails, check **`bonsai-8b/Makefile`** (`model`, `build.cpu`, `build.cpu-blas`, `run.cpu-blas`, …), per-subdir Makefiles, and the model path you pass at runtime.
+If something fails, check **`bonsai-8b/Makefile`** (`model`, `build.cpu`, `build.cpu-blas`, `build.gpu-cuda`, `run.cpu-blas`, `run.gpu-cuda`, …), per-subdir Makefiles, and the model path you pass at runtime.
