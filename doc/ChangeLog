@@ -4,9 +4,23 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 03:06:26
+
+**`README.md` / `README.en.md`**: GPU 付録を **`doc/design.md`** と整合 — **`--turboquant`** 時は F32 `kc`/`vc` と pack を併存、**Attention は F32 KV**、TurboQuant Attention 分岐は未接続、VRAM 節約なし。VRAM 表・Decode/Prefill の KV 書き込み・Flash Attention 節・制約・CLI **`--turboquant`**・ディレクトリ（**`turboquant.c`/`turboquant.h`**）・ソース案内を更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-21 03:04:46
+
+**`bonsai-8b/gpu-cuda/kernels.cu`**: **`--turboquant` 時の forward 経路を整理** — **`kc_pack`/`vc_pack` へ圧縮**（**`kv_tq_compress_*`**）しつつ **F32 `kc`/`vc` も確保・填充**し、**`flash_attn_*` は F32 KV（`use_tq=0`）** のみ使用（TurboQuant Attention 分岐はカーネル内に残すが **`gpu_forward` / `gpu_forward_prefill` から未接続**）。**`DevTurboQuant`** をカーネル引数に**値渡し**。**`TQ_QJL_SCALE`** を **`sqrt(pi/2)/d`** に修正。TurboQuant タイル処理に **`__syncthreads`** を追加。pack 確保時に **`cudaMemset`**。
+
+**`doc/design.md`**: 上記（F32+pack 併存、Attention は F32、TQ Attention 未接続、VRAM 節約なし）を VRAM 表・実行挙動・Attention 節・制約に反映。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 02:41:23
 
-**`bonsai-8b/gpu-cuda/`**: **TurboQuant KV の既定を F32 に変更**（**`--turboquant`** で有効化。旧 **`--no-tq`** は削除）。**`kernels.cu`**: Attention で **`q_rot`/`sq` をヘッドあたり 1 回**、キーごとは **`dev_tq_score_key`**、V は **`dev_tq_load_v_tile`**（タイル協調 matvec）。KV 圧縮は **`kv_tq_compress_*`** を **`<<<…, FA_HD>>>`** で並列化（shared 上の **`dev_tq_compress_par`**）。
+**`bonsai-8b/gpu-cuda/`**: **TurboQuant KV の既定を F32 に変更**（**`--turboquant`** で有効化。旧 **`--no-tq`** は削除）。**`kernels.cu`**: TurboQuant Attention 補助（**`q_rot`/`sq` をヘッドあたり 1 回**、**`dev_tq_score_key`**、**`dev_tq_load_v_tile`**）と KV 圧縮 **`kv_tq_compress_*`**（**`<<<…, FA_HD>>>`**、**`dev_tq_compress_par`**）を実装（当時は Attention から TQ 経路を呼ぶ想定。後続コミット／作業ツリーで F32 Attention に切替）。
 
 **`README.md`**: 付録の VRAM 表・forward ステップ・制約を上記 CLI／TurboQuant 挙動に整合。
 

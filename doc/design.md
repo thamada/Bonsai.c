@@ -72,7 +72,7 @@
 | 表の指標（prefill） | stderr の `Prefill complete` 行（**`gpu_forward_prefill`** バッチ、`-use_fast_math`） |
 | 表の指標（decode） | decode 時間・tok/s（stderr の `Decode complete` 行） |
 | ビルド | `gpu-cuda/Makefile` 既定（**`-gencode arch=compute_86,code=compute_86`** PTX、ドライバ JIT） |
-| Attention | **Flash Attention + K/V shared staging**（decode: **`flash_attn_gqa_kernel`** `<<<n_heads, FA_HD>>>` / prefill: **`flash_attn_prefill_gqa_kernel`** `<<<n_tokens×n_heads, FA_HD>>>`、因果マスク、shared ≈ 65 KB、carveout=100）。KV 既定 F32、**`--turboquant`** で圧縮 KV + 最適化 score/V 復元 |
+| Attention | **Flash Attention + K/V shared staging**（decode: **`flash_attn_gqa_kernel`** `<<<n_heads, FA_HD>>>` / prefill: **`flash_attn_prefill_gqa_kernel`** `<<<n_tokens×n_heads, FA_HD>>>`、因果マスク、shared ≈ 65 KB、carveout=100）。**Attention 入力は常に F32 `kc`/`vc`**。KV 既定 F32 のみ。**`--turboquant`** 時は書き込みに **`kc_pack`/`vc_pack` へ圧縮を追加**（Attention 経路は F32 のまま） |
 
 | バイナリ | prefill tok/s | decode 時間 | decode スループット |
 |----------|-------------:|----------:|-----------------:|
@@ -245,11 +245,11 @@ make build
 
 **`gpu-cuda`** は **`cpu-blas`** と同一の GGUF 読み込み・**`chat_encode`**・RoPE パラメータ・CLI を持つ。差分は forward の実行先・メモリ配置・**prefill / decode の経路分割**である。
 
-1. **起動時**: **`gpu_print_device_info()`** で GPU 名等を表示。**`gpu_model_create`** 内で **`flash_attn_init_once()`** が **`flash_attn_gqa_kernel`** と **`flash_attn_prefill_gqa_kernel`** の双方に **`cudaFuncAttributePreferredSharedMemoryCarveout=100`** を設定（shared ≈ 65 KB/ブロック）。GGUF を mmap したうえで重み・norm・KV キャッシュを VRAM へアップロード。**KV は既定 F32（`kc`/`vc`）**。**`--turboquant`** かつ **`head_dim == GPU_TQ_DIM`（128）** のとき **`kc_pack`/`vc_pack`** と **`DevTurboQuant`**（**`Pi`/`S` 回転・コードブック**を H2D）を確保（**`turboquant_tables_create`** は CPU）。加えて **prefill バッチ用**に **`x_batch` / `xb_batch` / `q_batch` …**（いずれも **`batch_cap = max_seq`** トークン分）と **`tokens_dev`**・**`q8_batch`**・**`rope_batch`** を **`cudaMalloc`**。**`GpuModel`**（**`gpu.h`**）がデバイス側ポインタを保持（推論中も mmap は保持し、終了時に **`munmap`**）。
-2. **Prefill**（**`generate()`**、`n_prompt > 1`）: プロンプト ID 配列を **`gpu_forward_prefill(gm, tokens, n_tokens)`** に渡し、全プロンプト位置を**一度に** forward。各層で **`emb_q1_0_batch`**・**`rmsnorm_batch`** / **`rmsnorm_head_batch`**・**`rope_neox_batch`**・**`gpu_mm_batch`**（Q8_0 量子化 + Q1_0 GEMV のバッチ版）・KV 書き込み（既定 **`kv_write_batch`**、**`--turboquant`** 時 **`kv_tq_compress_batch_kernel`**）・**`flash_attn_prefill_gqa_kernel`** `<<<n_tokens × n_heads, FA_HD>>>`（位置 **`t`** は K/V の **`0..t`** のみ参照する因果 Attention）・**`swiglu_batch`** / **`add_batch`** を実行。最終 norm + LM head は**末尾トークン**（**`n_tokens - 1`**）のみ **`rmsnorm_kernel`** + **`gpu_mm`** で logits を得る。**`n_prompt == 1`** のときは従来どおり 1 トークン **`gpu_forward`**。
-3. **Decode**: 末尾 logits からサンプリングした次トークンを、位置 **`n_prompt + gen_i`** で **1 トークンずつ `gpu_forward`**（teacher forcing なし）。各ステップで **`flash_attn_gqa_kernel`** `<<<n_heads, FA_HD>>>`（デコード用 Flash Attention + K/V staging）。**`--turboquant`** 時は Attention 内で **`q_rot`/`sq` をヘッドあたり 1 回**計算し、キーごとは軽量 score（**`dev_tq_score_key`**）+ タイル単位 V 復元（**`dev_tq_load_v_tile`**、128 スレッド協調）。
+1. **起動時**: **`gpu_print_device_info()`** で GPU 名等を表示。**`gpu_model_create`** 内で **`flash_attn_init_once()`** が **`flash_attn_gqa_kernel`** と **`flash_attn_prefill_gqa_kernel`** の双方に **`cudaFuncAttributePreferredSharedMemoryCarveout=100`** を設定（shared ≈ 65 KB/ブロック）。GGUF を mmap したうえで重み・norm・KV キャッシュを VRAM へアップロード。**KV は既定 F32（`kc`/`vc`）のみ**。**`--turboquant`** かつ **`head_dim == GPU_TQ_DIM`（128）** のとき **`kc_pack`/`vc_pack`**（**`cudaMemset` 初期化**）と **`DevTurboQuant`**（**`Pi`/`S` 回転・コードブック**を H2D、カーネル引数は**値渡し**）を**追加**確保するが、**F32 `kc`/`vc` も同時に確保**（Attention 用）。**`turboquant_tables_create`** は CPU。加えて **prefill バッチ用**に **`x_batch` / `xb_batch` / `q_batch` …**（いずれも **`batch_cap = max_seq`** トークン分）と **`tokens_dev`**・**`q8_batch`**・**`rope_batch`** を **`cudaMalloc`**。**`GpuModel`**（**`gpu.h`**）がデバイス側ポインタを保持（推論中も mmap は保持し、終了時に **`munmap`**）。
+2. **Prefill**（**`generate()`**、`n_prompt > 1`）: プロンプト ID 配列を **`gpu_forward_prefill(gm, tokens, n_tokens)`** に渡し、全プロンプト位置を**一度に** forward。各層で **`emb_q1_0_batch`**・**`rmsnorm_batch`** / **`rmsnorm_head_batch`**・**`rope_neox_batch`**・**`gpu_mm_batch`**（Q8_0 量子化 + Q1_0 GEMV のバッチ版）・KV 書き込み（既定 **`kv_write_batch`** のみ。**`--turboquant`** 時は **`kv_tq_compress_batch_kernel`** で **`kc_pack`/`vc_pack` へ圧縮**したうえで **`kv_write_batch`** により F32 **`kc`/`vc` も填充**）・**`flash_attn_prefill_gqa_kernel`** `<<<n_tokens × n_heads, FA_HD>>>`（**F32 `kc`/`vc`**、`use_tq=0`。位置 **`t`** は K/V の **`0..t`** のみ参照する因果 Attention）・**`swiglu_batch`** / **`add_batch`** を実行。最終 norm + LM head は**末尾トークン**（**`n_tokens - 1`**）のみ **`rmsnorm_kernel`** + **`gpu_mm`** で logits を得る。**`n_prompt == 1`** のときは従来どおり 1 トークン **`gpu_forward`**。
+3. **Decode**: 末尾 logits からサンプリングした次トークンを、位置 **`n_prompt + gen_i`** で **1 トークンずつ `gpu_forward`**（teacher forcing なし）。各ステップで **`flash_attn_gqa_kernel`** `<<<n_heads, FA_HD>>>`（デコード用 Flash Attention + **F32 K/V staging**）。**`--turboquant`** 時も KV 書き込みは **`kv_tq_compress_kernel`** で pack へ圧縮しつつ **F32 `kc`/`vc` へ D2D**、Attention は **F32 経路**（`use_tq=0`）。**`kernels.cu`** 内の TurboQuant Attention 補助（**`dev_tq_score_key`** / **`dev_tq_load_v_tile`**、`q_rot`/`sq` をヘッドあたり 1 回）は実装済みだが **`gpu_forward` / `gpu_forward_prefill` からは未接続**。
 4. **Q1_0 GEMV**: 単トークン経路は **`quantize_q8_0_kernel` + `mm_q1_0_kernel`**、prefill バッチ経路は **`quantize_q8_0_batch_kernel` + `mm_q1_0_batch_kernel`**（いずれも **`cpu-blas`** 準拠ロジック）。
-5. **Attention（共通）**: シーケンス方向 **`FA_BR=64`** タイル、K/V を **`k_tile` / `v_tile`**（shared）へ staging、**online softmax**（**`fa_sh_reduce_max` / `fa_sh_reduce_sum`**）、**`att` 非物質化**、GQA 対応。F32 KV 時は K/V をタイルへ D2D ロード。**TurboQuant** 時は圧縮 K から QJL 付き内積推定、V は PolarQuant 復元後 **`Pi^T`** でタイルへ載せる。
+5. **Attention（共通）**: シーケンス方向 **`FA_BR=64`** タイル、K/V を **`k_tile` / `v_tile`**（shared）へ staging、**online softmax**（**`fa_sh_reduce_max` / `fa_sh_reduce_sum`**）、**`att` 非物質化**、GQA 対応。**現行 forward 経路**は K/V を **F32 `kc`/`vc`** からタイルへ D2D ロード（`use_tq=0`）。**`kernels.cu`** には **`use_tq=1`** 時の TurboQuant 分岐（圧縮 K から QJL 付き score、V は PolarQuant 復元後 **`Pi^T`** でタイル、`DevTurboQuant` 値渡し、タイル内 **`__syncthreads`**）も残るが **`gpu_forward` 系からは呼ばれない**。
 6. **サンプリング**: prefill 直後および各 decode ステップ後に **`gpu_copy_logits`** で logits を D2H し、CPU で温度・top-p サンプリング（CPU バリアントと同ロジック）。
 
 #### VRAM 配置（`gpu_model_create`、README 付録と同内容）
@@ -259,13 +259,13 @@ make build
 | 重み | `token_embd`、各層 `wq/wk/wv/wo/gate/up/down`、`output` | Q1_0（g128） |
 | 重み | `attn_norm`、`q_norm`、`k_norm`、`ffn_norm`、`output_norm` | F32 |
 | KV キャッシュ（既定） | `kc`、`vc` | F32、`n_layers × max_seq × kv_dim` |
-| KV キャッシュ（`--turboquant`） | `kc_pack`、`vc_pack` | **TurboQuant**（PolarQuant 2-bit + QJL 1-bit／座標、**48 B/head**、レイアウト `[layer][kv_head][seq_pos]`） |
+| KV キャッシュ（`--turboquant`） | `kc`、`vc` **および** `kc_pack`、`vc_pack` | **Attention は F32 `kc`/`vc`**。`kc_pack`/`vc_pack` は **TurboQuant** 圧縮コピー（PolarQuant 2-bit + QJL 1-bit／座標、**48 B/head**、レイアウト `[layer][kv_head][seq_pos]`）。F32 と pack を**併存**（VRAM は F32 単独より増） |
 | Decode 活性化 | `x`、`xb`、`xb2`、`q`、`k`、`v`、`hb`、`hb2`、`logits`、`q8` | F32 / Q8_0 |
 | Prefill バッチ | `x_batch`、`xb_batch`、… `q8_batch`、`tokens_dev`、`rope_batch` 等 | **`batch_cap = max_seq`**（**`-l`**）分を事前確保 |
 
 #### Decode 1 ステップ（`gpu_forward`、レイヤー `l` あたり）
 
-Embedding（`emb_q1_0_kernel`）→ Attention 前 RMSNorm → Q/K/V 投影（`gpu_mm`）→ Q/K head norm → RoPE（cos/sin は CPU 生成→H2D）→ KV 書き込み（既定 F32 D2D、**`--turboquant`** 時 **`kv_tq_compress_kernel`** `<<<n_kv, FA_HD>>>`）→ **`flash_attn_gqa_kernel`** → `wo` + 残差 → FFN norm → gate/up → SwiGLU → down + 残差。最終層後: output norm → LM head → `logits`。
+Embedding（`emb_q1_0_kernel`）→ Attention 前 RMSNorm → Q/K/V 投影（`gpu_mm`）→ Q/K head norm → RoPE（cos/sin は CPU 生成→H2D）→ KV 書き込み（F32 D2D。**`--turboquant`** 時は **`kv_tq_compress_kernel`** `<<<n_kv, FA_HD>>>` で pack へ圧縮も実行）→ **`flash_attn_gqa_kernel`**（F32 `kc`/`vc`）→ `wo` + 残差 → FFN norm → gate/up → SwiGLU → down + 残差。最終層後: output norm → LM head → `logits`。
 
 #### Prefill バッチ（`gpu_forward_prefill`、カーネル対応）
 
@@ -276,7 +276,7 @@ Embedding（`emb_q1_0_kernel`）→ Attention 前 RMSNorm → Q/K/V 投影（`gp
 | Q/K/V/O, gate/up/down | `gpu_mm_batch` | `(token, 出力行)` |
 | Q/K head norm | `rmsnorm_head_batch_kernel` | `(token, head)` |
 | RoPE | `rope_neox_batch_kernel` | `(token, head)` |
-| KV 書き込み | `kv_write_batch_kernel`（既定） / `kv_tq_compress_batch_kernel`（**`--turboquant`**） | 1 block / トークン（F32） / `<<<n_tokens × n_kv, FA_HD>>>`（圧縮） |
+| KV 書き込み | `kv_write_batch_kernel`（F32） / **`--turboquant`** 時は **`kv_tq_compress_batch_kernel`** も | 1 block / トークン → F32。**`--turboquant`** 時は `<<<n_tokens × n_kv, FA_HD>>>` で pack 圧縮のあと **`kv_write_batch`** で F32 も填充 |
 | Attention | `flash_attn_prefill_gqa_kernel` | `(token, head)`、因果 `npos = t + 1` |
 | 残差・SwiGLU | `add_batch_kernel`、`swiglu_batch_kernel` | 要素並列 |
 
@@ -327,7 +327,7 @@ LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の De
 - **`cpu`**: **`dot_q1_0_row`** / **`mm_q1_0_rows`** で融合行内積（`ggml-quants.c` の dequantize + 内積と同等、中間 FP32 ブロックなし）。
 - **`cpu-omp`**: 同上。行ループを **`#pragma omp parallel for`** で並列化。
 - **`cpu-blas`**: **`quantize_row_q8_0`** + **`vec_dot_q1_0_q8_0`**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠。AVX2 で SIMD、非 AVX2 は generic 参照）。**`State`** に **`BlockQ8_0 *q8`** を確保（`max(dim, hidden_dim) / QK8_0` ブロック）。
-- **`gpu-cuda`**: デバイス上で **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**（単トークン + **`*_batch`** 版）。Attention は decode **`flash_attn_gqa_kernel`** / prefill **`flash_attn_prefill_gqa_kernel`**（K/V shared staging、起動時 **`flash_attn_init_once`**）。オプションで KV を **TurboQuant**（[arXiv:2504.19874](https://arxiv.org/abs/2504.19874)）— **`--turboquant`**、**`head_dim=128`** 必須。
+- **`gpu-cuda`**: デバイス上で **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**（単トークン + **`*_batch`** 版）。Attention は decode **`flash_attn_gqa_kernel`** / prefill **`flash_attn_prefill_gqa_kernel`**（**F32 K/V**、shared staging、起動時 **`flash_attn_init_once`**）。**`--turboquant`**（[arXiv:2504.19874](https://arxiv.org/abs/2504.19874)、**`head_dim=128`** 必須）で KV 書き込み時に **TurboQuant 圧縮バッファ**を追加更新するが、**Attention は F32 KV を参照**（カーネル内 TQ Attention 分岐は未接続）。
 
 ### RoPE
 
@@ -353,7 +353,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（参考 decode **30.79 tok/s**）を推奨。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする。`-ffast-math` / **`-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。
-- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s**（バッチ prefill・**F32 KV 既定**）、decode **~50 tok/s**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**。**VRAM** に prefill バッチ（**`max_seq` 分**）含む。**Flash Attention** shared ≈ 65 KB/ブロック・**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。**TurboQuant** は **`--turboquant`** で有効（未指定時 F32 KV）。**`head_dim != 128`** 指定時は TurboQuant を自動無効化。Prefill と Decode で KV キャッシュ形式は共有。
+- **`gpu-cuda`**（付録）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考 prefill **~294 tok/s**（バッチ prefill・**F32 KV 既定**）、decode **~50 tok/s**。既定 **`CUDA_GENCODE=arch=compute_86,code=compute_86`**。**VRAM** に prefill バッチ（**`max_seq` 分**）含む。**Flash Attention** shared ≈ 65 KB/ブロック・**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。**TurboQuant** は **`--turboquant`** で pack 圧縮を追加（未指定時 F32 KV のみ）。**`head_dim != 128`** 指定時は TurboQuant を自動無効化。**`--turboquant` 時も Attention は F32 `kc`/`vc`** のため VRAM 節約効果は現状なし（pack は実験用）。Prefill と Decode で F32 KV は共有。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。
