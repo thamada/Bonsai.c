@@ -327,15 +327,27 @@ LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の De
 
 #### NVFP4 + CUTLASS（`BONSAI_FP4=1`、`make run`）
 
-**`main.c` は NVFP4 を直接呼ばない。** **`kernels.cu`** が **`#ifdef BONSAI_FP4`** で次を切り替える。
+**NVFP4（要約）:** Blackwell Tensor Core 向け **4 bit 浮動小数**。要素値は **E2M1**（4 bit）、**16 要素**（`SF_VEC_SIZE`）ごとに **UE4M3** スケール（8 bit）を 1 つ。おおよそ `実数 ≈ scale × E2M1`。
+
+**E2M1（4 bit / 要素）** — 符号 1 + 指数 2 + 仮数 1（CUTLASS `float_e2m1_t`）。表現できる**絶対値は 8 段階のみ**（`fp4_gemm.cu` のルックアップ = NVIDIA 公式）:
+
+| code (3 bit) | 絶対値 |
+|:---:|:---:|
+| 0〜7 | 0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0 |
+
+bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない**（丸め**境界** — ModelOpt の `e2m1_bounds` は `0.25, 0.75, 1.25, …` など中点）。2 要素 / byte（下位ニブル = 偶数 index）。
+
+**UE4M3（8 bit / 16 要素）** — 符号なし、exp 4 bit（バイアス 7）+ mant 3 bit。ブロック max から `scale` を決め、正規化後に E2M1 へ量子化。
+
+**実装分担** — **`main.c` は NVFP4 を直接呼ばない。** **`kernels.cu`** が **`#ifdef BONSAI_FP4`** で切り替え:
 
 | ファイル | 役割 |
 |----------|------|
-| `fp4_gemm.cu` | CUTLASS **SM120 block-scaled NVFP4 GEMM**（BF16 → E2M1 + UE4M3 量子化、`fp4_gemm_run_cached`） |
-| `fp4_bonsai.cu` | Q1_0 重みの **起動時一度限り** NVFP4 キャッシュ化、推論時 F32 ↔ BF16 ↔ GEMM |
-| `kernels.cu` | `gpu_model_create` で **`fp4_bonsai_init`** / **`dev_upload_fp4_q1_layers`**、`gpu_mm*` → **`gpu_mm_fp4`** |
+| `fp4_gemm.cu` | CUTLASS **SM120 block-scaled NVFP4 GEMM**（BF16 → E2M1 + UE4M3、`fp4_gemm_run_cached`） |
+| `fp4_bonsai.cu` | Q1_0 → **起動時** NVFP4 重みキャッシュ、推論時 F32 ↔ BF16 ↔ GEMM |
+| `kernels.cu` | **`fp4_bonsai_init`** / **`dev_upload_fp4_q1_layers`**、`gpu_mm*` → **`gpu_mm_fp4`** |
 
-**対象**: 各層 **`wq` / `wk` / `wv` / `wo` / `gate` / `up` / `down`** と **`output`（LM head）** のみ。Embedding・norm・RoPE・Attention・SwiGLU・KV は変更なし。**`M` / `N` / `K` は 128 倍数**（パディング）。README 付録と同内容の詳細手順あり。
+**対象レイヤ**: **`wq`〜`down`** と **`output`（LM head）** のみ。**`M`/`N`/`K` は 128 倍数**。GGUF は Q1_0 のまま、**BF16 復元 → NVFP4 キャッシュ**は起動時。ビット図・ビルド手順の全文は **README 付録「NVFP4 + CUTLASS」** を参照。
 
 進捗表示・スループット計測の**出力形式**は **「進捗表示とスループット計測（全バリアント共通）」** と同様（**`generate()`** 内の static ヘルパ）。prefill プログレスバーの更新タイミングは上記のとおり **`gpu-cuda` のみ異なる**。
 
@@ -382,7 +394,7 @@ LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の De
 - **`cpu-omp`**: 同上。行ループを **`#pragma omp parallel for`** で並列化。
 - **`cpu-blas`**: **`quantize_row_q8_0`** + **`vec_dot_q1_0_q8_0`**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠。AVX2 で SIMD、非 AVX2 は generic 参照）。**`State`** に **`BlockQ8_0 *q8`** を確保（`max(dim, hidden_dim) / QK8_0` ブロック）。
 - **`gpu-cuda`（`make run.no-fp4`）**: **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**（単トークン + **`*_batch`** 版）。
-- **`gpu-cuda`（`make run` / `BONSAI_FP4=1`）**: 線形層は **NVFP4 + CUTLASS block-scaled GEMM**（**`fp4_bonsai_mm`**）。Attention は decode **`flash_attn_gqa_kernel`** / prefill **`flash_attn_prefill_gqa_kernel`**（K/V shared staging、**`FA_BR`** タイル、起動時 **`flash_attn_init_once`**）。
+- **`gpu-cuda`（`make run` / `BONSAI_FP4=1`）**: 線形層は **NVFP4 E2M1（8 段階）+ UE4M3 ブロックスケール + CUTLASS GEMM**（**`fp4_bonsai_mm`**）。Attention は decode **`flash_attn_gqa_kernel`** / prefill **`flash_attn_prefill_gqa_kernel`**（K/V shared staging、**`FA_BR`** タイル、起動時 **`flash_attn_init_once`**）。
 
 ### RoPE
 

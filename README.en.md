@@ -457,6 +457,52 @@ Decode: 256 threads/block parallel over output dimension `d`. Prefill: parallel 
 
 #### NVFP4 + CUTLASS (Blackwell, `make run`)
 
+**What NVFP4 is (short):** A **4-bit floating-point** format for NVIDIA Blackwell Tensor Cores, used with **block scaling**: each value is rounded to **4-bit E2M1**, and every **16 elements** (`SF_VEC_SIZE`) share one **8-bit UE4M3** scale. Roughly, `value ≈ scale × decoded_E2M1`.
+
+**E2M1 (one value, 4 bits)** — 1 sign bit + 2 exponent bits + 1 mantissa bit (same encoding as CUTLASS `float_e2m1_t`). **Only eight positive magnitudes** can be stored (NVIDIA spec; matches the lookup table in `fp4_gemm.cu`):
+
+| code (3 bit) | \|value\| |
+|:---:|:---:|
+| 0 | 0 |
+| 1 | 0.5 |
+| 2 | 1.0 |
+| 3 | 1.5 |
+| 4 | 2.0 |
+| 5 | 3.0 |
+| 6 | 4.0 |
+| 7 | 6.0 |
+
+Bit 3 is the sign (0 = non-negative, 1 = negative). **0.75 is not one of these eight levels** — it is a **quantization boundary** (midpoint between neighbors). [NVIDIA Model-Optimizer](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/quantization/qtensor/nvfp4_tensor.py) uses boundaries such as `0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5` when rounding floats to the nearest E2M1 code. A real value like `0.75` is approximated as `scale ×` the nearest table entry after block scaling.
+
+Bit layout (`d_float_to_fp4` in `fp4_gemm.cu`):
+
+```text
+  bit:   3    2 1 0
+        +---+-------+
+        | S | code  |   S: sign (0 = non-negative, 1 = negative) ／ code: 3-bit index in the table above
+        +---+-------+
+```
+
+Two values packed per byte (low nibble = even index):
+
+```text
+  byte:  7 6 5 4 | 3 2 1 0
+        +---------+---------+
+        | fp4[i+1]| fp4[i]  |
+        +---------+---------+
+```
+
+**UE4M3 (block scale, 8 bits / 16 elements)** — unsigned, 4-bit exponent (bias 7) + 3-bit mantissa. The scale is derived from the block max absolute value; each E2M1 is normalized by that scale before quantization (CUTLASS block-scaled NVFP4 layout).
+
+```text
+  bit:   7 6 5 4   3 2 1 0
+        +---------+-------+
+        |  exp(4) | mant(3)|   approximate range in code comments: [~0.002, 480]
+        +---------+-------+
+```
+
+GGUF weights stay **Q1_0 (1-bit + FP16 scale)** on disk; this project **dequantizes to BF16 at startup**, then builds an **NVFP4 GPU cache** for GEMM (the GGUF file is not stored as NVFP4).
+
 Active only when built with **`BONSAI_FP4=1`** (`gpu-cuda/Makefile`: **`make run`** / **`make blackwell`**). **`main.c` does not call NVFP4 directly** — GGUF loading, `generate`, and sampling are unchanged; only **linear-layer GEMV/GEMM inside `kernels.cu`** switches to FP4 Tensor Core processing. Embedding, RMSNorm, RoPE, Flash Attention, SwiGLU, and the KV cache are unchanged.
 
 | File | Role |

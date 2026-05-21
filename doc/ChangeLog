@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 12:56:15
+
+**`README.md` / `README.en.md`**: GPU 付録に **NVFP4 の概要**（E2M1 8 段階の値表、ビット割り当て、2 要素/byte パック、UE4M3）を追加。**0.75 は表現値ではなく量子化境界**である旨と Model-Optimizer 参照を追記。
+
+**`doc/design.md`**: 「NVFP4 + CUTLASS」節に E2M1 / UE4M3 の要約・値表・0.75 の注記を追記。量子化節の FP4 記述を整合。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 12:31:04
 
 **`bonsai-8b/gpu-cuda/Makefile`**: 既定ターゲットを **`run`**（Blackwell + NVFP4）に変更（**`.DEFAULT_GOAL := run`**）。旧 **`run`** を **`run.no-fp4`** に改名。旧 **`run.blackwell`** を **`run`** に統合。**`readlink -f`** で **`nvcc` 実ディレクトリを `PATH` 先頭に追加**（`nvlink` 未検出対策）。**`blackwell`** 時に **`/usr/local/bin/nvlink`** シンボリックリンクも作成。
