@@ -4,7 +4,7 @@
 # 例: make build CUDA_GENCODE=arch=compute_90,code=sm_90
 #
 # Blackwell GPU（RTX 50 系等）: make blackwell
-#   apt の CUDA 11 ツールキットを削除し、NVIDIA 公式リポジトリから CUDA 13 を入れてビルドする（要 sudo）。
+#   apt CUDA 11 削除 → CUDA 13 インストール → NVFP4 Tensor Core (CUTLASS) + sm_120 ビルド
 
 CUDA_GENCODE ?= arch=compute_86,code=compute_86
 
@@ -21,9 +21,27 @@ LDFLAGS ?= -lcudart -lm
 MODEL   ?= ../Bonsai-8B-Q1_0.gguf
 PROMPT  ?= Hello, how are you?
 
-BLACKWELL_GENCODE ?= arch=compute_120,code=sm_120
+BLACKWELL_GENCODE ?= arch=compute_120a,code=sm_120a
 BLACKWELL_FA_BR     ?= 32
 CUDA13_NVCC         ?= /usr/local/cuda/bin/nvcc
+
+CUTLASS_DIR ?= third_party/cutlass
+CUTLASS_TAG ?= v3.9.0
+
+# Blackwell FP4 ビルド: BONSAI_FP4=1（make blackwell が自動設定）
+BONSAI_FP4 ?= 0
+
+FP4_CXXFLAGS = -std=c++17 --expt-relaxed-constexpr \
+               -I$(CUTLASS_DIR)/include \
+               -I$(CUTLASS_DIR)/tools/util/include \
+               -DCUTLASS_ARCH_MMA_SM120_SUPPORTED
+
+FP4_FLAG :=
+FP4_OBJS :=
+ifneq ($(BONSAI_FP4),0)
+FP4_FLAG  := -DBONSAI_FP4=1
+FP4_OBJS  := fp4_gemm.o fp4_bonsai.o
+endif
 
 # Blackwell (sm_120) は静的 shared 上限 48 KB。FA_BR=32 で Flash Attention が収まる。
 FA_BR_FLAG :=
@@ -31,24 +49,38 @@ ifneq ($(FA_BR),)
 FA_BR_FLAG := -DFA_BR=$(FA_BR)
 endif
 
-.PHONY: build run clean blackwell run.blackwell
+.PHONY: build run clean blackwell run.blackwell cutlass
 
-build: main.o kernels.o
-	$(NVCC) $(NVCCFLAGS) -o bonsai-gpu-cuda main.o kernels.o $(LDFLAGS)
+build: main.o kernels.o $(FP4_OBJS)
+	$(NVCC) $(NVCCFLAGS) -o bonsai-gpu-cuda main.o kernels.o $(FP4_OBJS) $(LDFLAGS)
 
 main.o: main.c gpu.h
 	$(CC) $(CFLAGS) -c main.c -o main.o
 
-kernels.o: kernels.cu gpu.h
-	$(NVCC) $(NVCCFLAGS) $(FA_BR_FLAG) -c kernels.cu -o kernels.o
+kernels.o: kernels.cu gpu.h fp4_bonsai.h
+	$(NVCC) $(NVCCFLAGS) $(FA_BR_FLAG) $(FP4_FLAG) -c kernels.cu -o kernels.o
+
+fp4_gemm.o: fp4_gemm.cu fp4_gemm.h | cutlass
+	$(NVCC) $(NVCCFLAGS) $(FP4_CXXFLAGS) -c fp4_gemm.cu -o fp4_gemm.o
+
+fp4_bonsai.o: fp4_bonsai.cu fp4_bonsai.h fp4_gemm.h gpu.h | cutlass
+	$(NVCC) $(NVCCFLAGS) $(FP4_CXXFLAGS) -c fp4_bonsai.cu -o fp4_bonsai.o
+
+cutlass:
+	@if [ ! -f "$(CUTLASS_DIR)/include/cutlass/cutlass.h" ]; then \
+		echo "=== Cloning CUTLASS $(CUTLASS_TAG) ==="; \
+		mkdir -p third_party; \
+		git clone --depth 1 --branch $(CUTLASS_TAG) \
+			https://github.com/NVIDIA/cutlass.git $(CUTLASS_DIR); \
+	fi
 
 run: build
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
 
 clean:
-	rm -f bonsai-gpu-cuda main.o kernels.o
+	rm -f bonsai-gpu-cuda main.o kernels.o fp4_gemm.o fp4_bonsai.o
 
-# apt CUDA 11 を削除 → NVIDIA 公式 CUDA 13 をインストール → Blackwell 向けビルド
+# apt CUDA 11 を削除 → NVIDIA 公式 CUDA 13 をインストール → Blackwell FP4 ビルド
 blackwell:
 	@if [ "$$(id -u)" -ne 0 ]; then SUDO=sudo; else SUDO=; fi; \
 	. /etc/os-release; \
@@ -84,15 +116,14 @@ blackwell:
 		rm -f "/tmp/$$KEYRING_DEB"; \
 	fi; \
 	$$SUDO apt-get update; \
-	$$SUDO apt-get install -y cuda-toolkit-13; \
+	$$SUDO apt-get install -y cuda-toolkit-13 git; \
 	if [ ! -x "$(CUDA13_NVCC)" ]; then \
 		echo "Error: $(CUDA13_NVCC) not found after cuda-toolkit-13 install."; \
-		echo "Check /usr/local/cuda/bin/nvcc or re-run: sudo apt install cuda-toolkit-13"; \
 		exit 1; \
 	fi; \
 	nvcc_ver=$$("$(CUDA13_NVCC)" --version | sed -n 's/.*release \([0-9][0-9]*\)\(\.[0-9]*\)*.*/\1/p' | head -1); \
 	if [ "$$nvcc_ver" -lt 13 ] 2>/dev/null; then \
-		echo "Error: expected CUDA Toolkit 13+, got release $$nvcc_ver from $(CUDA13_NVCC)"; \
+		echo "Error: expected CUDA Toolkit 13+, got release $$nvcc_ver"; \
 		exit 1; \
 	fi; \
 	echo "=== CUDA $$("$(CUDA13_NVCC)" --version | sed -n 's/.*release \([^,]*\).*/\1/p' | head -1) ready ==="; \
@@ -104,12 +135,12 @@ blackwell:
 		$$SUDO chmod 644 "$$CUDA_PROFILE"; \
 	fi; \
 	$$SUDO ln -sf "$$CUDA_BIN/nvcc" /usr/local/bin/nvcc; \
-	if ! command -v nvcc >/dev/null 2>&1; then \
-		export PATH="$$CUDA_BIN:$$PATH"; \
-	fi; \
+	if ! command -v nvcc >/dev/null 2>&1; then export PATH="$$CUDA_BIN:$$PATH"; fi; \
 	echo "nvcc: $$(command -v nvcc)"; \
-	echo "=== Building for Blackwell ($(BLACKWELL_GENCODE), FA_BR=$(BLACKWELL_FA_BR)) ==="; \
-	$(MAKE) build CUDA_GENCODE="$(BLACKWELL_GENCODE)" NVCC="$(CUDA13_NVCC)" FA_BR="$(BLACKWELL_FA_BR)"
+	$(MAKE) cutlass; \
+	echo "=== Building Blackwell FP4 ($(BLACKWELL_GENCODE), FA_BR=$(BLACKWELL_FA_BR)) ==="; \
+	$(MAKE) build CUDA_GENCODE="$(BLACKWELL_GENCODE)" NVCC="$(CUDA13_NVCC)" \
+		FA_BR="$(BLACKWELL_FA_BR)" BONSAI_FP4=1
 
 run.blackwell: blackwell
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"

@@ -67,7 +67,7 @@ run.cpu-blas: build.cpu-blas
 	./cpu-blas/bonsai-cpu-blas "$(MODEL)" -p "$(PROMPT)"
 
 # -----------------------------------------------------------------------------
-# GPU CUDA + cuBLAS（ソースは gpu-cuda/main.c + kernels.cu）
+# GPU CUDA（ソースは gpu-cuda/main.c + kernels.cu。cuBLAS 不要）
 build.gpu-cuda:
 	cd gpu-cuda && make build
 

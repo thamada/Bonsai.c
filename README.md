@@ -358,7 +358,7 @@ cd bonsai-8b && make model
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-困ったときは、`bonsai-8b/Makefile`（`model` / `build.cpu` / `build.cpu-blas` / `run.cpu-blas` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。
+困ったときは、`bonsai-8b/Makefile`（`model` / `build.cpu` / `build.cpu-blas` / `run.cpu-blas` / `build.gpu-cuda` / `build.blackwell` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。
 
 ---
 
