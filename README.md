@@ -457,6 +457,52 @@ Decode 版は出力次元 `d` 方向に 256 スレッド/block で並列。Prefi
 
 #### NVFP4 + CUTLASS（Blackwell、`make run`）
 
+**NVFP4 とは（要約）:** NVIDIA Blackwell 向けの **4 bit 浮動小数**形式で、行列積は **ブロック単位のスケール（block-scaled）** と組み合わせて Tensor Core で実行する。1 要素あたり **4 bit の E2M1** に値を丸め、近傍 **16 要素**（`SF_VEC_SIZE`）ごとに **8 bit の UE4M3** スケールを 1 つ持つ。復元のイメージは `実数 ≈ scale × E2M1の値` である。
+
+**E2M1（1 要素・4 bit）** — 符号 1 bit + 指数 2 bit + 仮数 1 bit（CUTLASS の `float_e2m1_t` と同型）。**表現できる絶対値は 8 段階のみ**（NVIDIA 公式・本実装のルックアップテーブル共通）:
+
+| code (3 bit) | 絶対値 |
+|:---:|:---:|
+| 0 | 0 |
+| 1 | 0.5 |
+| 2 | 1.0 |
+| 3 | 1.5 |
+| 4 | 2.0 |
+| 5 | 3.0 |
+| 6 | 4.0 |
+| 7 | 6.0 |
+
+bit 3 が符号（0=非負、1=負）。**0.75 は上記 8 段階のいずれでもない** — 量子化の**しきい値**（隣接値の中点）として使われる。[NVIDIA Model-Optimizer](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/quantization/qtensor/nvfp4_tensor.py) では `0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5` などが境界。`0.75` のような実数は、ブロックスケール `scale` を掛けたうえで最も近い段階に丸められる。
+
+ビット割り当て（`fp4_gemm.cu` の `d_float_to_fp4`）:
+
+```text
+  bit:   3    2 1 0
+        +---+-------+
+        | S | code  |   S: 符号 (0=非負, 1=負) ／ code: 上表の 3 bit インデックス
+        +---+-------+
+```
+
+2 要素を **1 byte** にパック（下位ニブルが偶数インデックス）:
+
+```text
+  byte:  7 6 5 4 | 3 2 1 0
+        +---------+---------+
+        | fp4[i+1]| fp4[i]  |
+        +---------+---------+
+```
+
+**UE4M3（ブロックスケール・8 bit / 16 要素）** — 符号なし、指数 4 bit（バイアス 7）+ 仮数 3 bit。ブロック内の最大絶対値からスケールを決め、各 E2M1 をそのスケールで正規化してから量子化する（CUTLASS の block-scaled NVFP4 レイアウト）。
+
+```text
+  bit:   7 6 5 4   3 2 1 0
+        +---------+-------+
+        |  exp(4) | mant(3)|   値の範囲は実装コメント上おおよそ [~0.002, 480]
+        +---------+-------+
+```
+
+本リポジトリの GGUF は **Q1_0（1 bit 重み + FP16 スケール）** のまま配布し、**起動時に BF16 へ復元 → NVFP4 キャッシュ**へ変換してから GEMM に渡す（GGUF ファイル自体は NVFP4 ではない）。
+
 **`BONSAI_FP4=1`** でビルドしたときのみ有効（`gpu-cuda/Makefile` の **`make run`** / **`make blackwell`**）。**`main.c` は NVFP4 を直接呼びません** — GGUF 読み込み・`generate`・サンプリングは従来どおりで、**`kernels.cu` 内の線形層 GEMV/GEMM だけ**が FP4 Tensor Core 処理に切り替わります。Embedding・RMSNorm・RoPE・Flash Attention・SwiGLU・KV キャッシュは変更ありません。
 
 | ファイル | 役割 |
