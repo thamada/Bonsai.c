@@ -4,6 +4,18 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-21 12:31:04
+
+**`bonsai-8b/gpu-cuda/Makefile`**: 既定ターゲットを **`run`**（Blackwell + NVFP4）に変更（**`.DEFAULT_GOAL := run`**）。旧 **`run`** を **`run.no-fp4`** に改名。旧 **`run.blackwell`** を **`run`** に統合。**`readlink -f`** で **`nvcc` 実ディレクトリを `PATH` 先頭に追加**（`nvlink` 未検出対策）。**`blackwell`** 時に **`/usr/local/bin/nvlink`** シンボリックリンクも作成。
+
+**`bonsai-8b/gpu-cuda/main.c`**: ファイルヘッダに **NVFP4 + CUTLASS** の利用箇所・処理の流れを追記（**`main.c` は直接呼ばず `kernels.cu` 経由**）。cuBLAS 不要の注記に修正。
+
+**`README.md` / `README.en.md`**: GPU 付録に **NVFP4 + CUTLASS** 節（ファイル役割・線形層のみ・起動時／推論時の処理）を追加。ディレクトリ構成・VRAM 表・ビルド表を更新。GPU ベンチマークを **`make run`（FP4 有効）** と **`make run.no-fp4`** の 2 構成に分割（RTX 5090 実測: prefill **~1365** / decode **~90.4 tok/s**、および prefill **~293** / decode **~47.0 tok/s**）。
+
+**`doc/design.md`**: 上記 Makefile ターゲット・NVFP4 節・GPU ベンチマーク 2 表・ディレクトリ／Make 表・ビルド手順・実行挙動・量子化・制約を README 付録と整合。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 05:23:25
 
 **`bonsai-8b/gpu-cuda/kernels.cu`**: Flash Attention の **`FA_BR`** を **`#ifndef FA_BR`** で上書き可能に。Blackwell（**sm_120**）は静的 shared 上限 **48 KB** のため **`FA_BR=64`**（≈65 KB）では **`ptxas`** が失敗する。

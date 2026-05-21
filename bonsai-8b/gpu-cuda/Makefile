@@ -11,6 +11,14 @@ CUDA_GENCODE ?= arch=compute_86,code=compute_86
 NVCC    ?= nvcc
 CC      ?= cc
 
+# /usr/local/bin/nvcc のみ PATH にあるとリンク時の nvlink が見つからない
+ifeq ($(findstring /,$(NVCC)),/)
+CUDA_BIN := $(dir $(shell readlink -f $(NVCC)))
+else
+CUDA_BIN := $(dir $(shell readlink -f $$(command -v $(NVCC) 2>/dev/null || echo $(CUDA13_NVCC))))
+endif
+export PATH := $(CUDA_BIN):$(PATH)
+
 NVCCFLAGS ?= -O3 -std=c++14 -Xcompiler -Wall,-Wextra,-Wno-unused-parameter \
              -use_fast_math --expt-relaxed-constexpr \
              -gencode $(CUDA_GENCODE)
@@ -49,7 +57,9 @@ ifneq ($(FA_BR),)
 FA_BR_FLAG := -DFA_BR=$(FA_BR)
 endif
 
-.PHONY: build run clean blackwell run.blackwell cutlass
+.PHONY: build run run.no-fp4 clean blackwell cutlass
+
+.DEFAULT_GOAL := run
 
 build: main.o kernels.o $(FP4_OBJS)
 	$(NVCC) $(NVCCFLAGS) -o bonsai-gpu-cuda main.o kernels.o $(FP4_OBJS) $(LDFLAGS)
@@ -74,7 +84,7 @@ cutlass:
 			https://github.com/NVIDIA/cutlass.git $(CUTLASS_DIR); \
 	fi
 
-run: build
+run.no-fp4: build
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
 
 clean:
@@ -135,6 +145,7 @@ blackwell:
 		$$SUDO chmod 644 "$$CUDA_PROFILE"; \
 	fi; \
 	$$SUDO ln -sf "$$CUDA_BIN/nvcc" /usr/local/bin/nvcc; \
+	$$SUDO ln -sf "$$CUDA_BIN/nvlink" /usr/local/bin/nvlink; \
 	if ! command -v nvcc >/dev/null 2>&1; then export PATH="$$CUDA_BIN:$$PATH"; fi; \
 	echo "nvcc: $$(command -v nvcc)"; \
 	$(MAKE) cutlass; \
@@ -142,5 +153,5 @@ blackwell:
 	$(MAKE) build CUDA_GENCODE="$(BLACKWELL_GENCODE)" NVCC="$(CUDA13_NVCC)" \
 		FA_BR="$(BLACKWELL_FA_BR)" BONSAI_FP4=1
 
-run.blackwell: blackwell
+run: blackwell
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
