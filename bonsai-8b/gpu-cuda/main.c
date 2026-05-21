@@ -1,18 +1,35 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Bonsai 系 dense デコーダ GGUF — NVIDIA GPU CUDA + cuBLAS 版。
+ * Bonsai 系 dense デコーダ GGUF — NVIDIA GPU CUDA 版（cuBLAS 不要）。
  *
- * 対象: Bonsai-8B-Q1_0.gguf（Q1_0 g128 + F32 norm 等）。テキスト経路のみ。
+ * 対象: Bonsai-8B-Q1_0.gguf（Q1_0 g128 + F32 norm 等）。テキスト処理のみ。
  * RoPE: llama.cpp の ggml_compute_forward_rope に倣い NeoX 半分ペア配置 + YaRN 系メタを解釈。
  *
  * GPU 方針（cpu-blas 準拠）:
- *   - 重み・KV キャッシュ・活性化は GPU 常駐。起動時に cudaMemcpy でアップロード。
+ *   - 重み・KV キャッシュ・活性化は GPU 常駐。起動時に VRAM へアップロード。
  *   - Prefill: 全プロンプトトークンをバッチ並列（gpu_forward_prefill）。
  *   - Decode: 1 トークンずつ gpu_forward。
- *   - Q1_0 GEMV: 活性化 Q8_0 化 + vec_dot_q1_0_q8_0 CUDA カーネル。
+ *   - 線形層（既定）: Q1_0 重みに対し活性化を Q8_0 化し vec_dot_q1_0_q8_0 CUDA カーネル（gpu_mm）。
  *   - Attention: Flash Attention（online softmax、att 行列非物質化、GQA 対応）。
  *   - サンプリングのみ CPU（logits を D2H コピー）。
+ *
+ * NVFP4 + CUTLASS（Blackwell / make run、BONSAI_FP4=1 ビルド時）:
+ *   本ファイル（main.c）からは FP4 を直接呼ばない。GGUF 読み込み後 gpu_model_create 等は
+ *   kernels.cu 経由で、線形層の GEMV/GEMM だけ FP4 Tensor Core 処理に切り替わる。
+ *   - ビルド: gpu-cuda/Makefile で BONSAI_FP4=1 のとき fp4_bonsai.o / fp4_gemm.o をリンク。
+ *             CUTLASS（third_party/cutlass）の SM120 block-scaled NVFP4 GEMM を fp4_gemm.cu が使用。
+ *   - 起動時（kernels.cu / gpu_model_create）:
+ *       fp4_bonsai_init で CUTLASS 用ワークスペース確保。
+ *       wq/wk/wv/wo/gate/up/down および LM head (out) の各層 Q1_0 重みを
+ *       fp4_bonsai_weight_from_q1_host（fp4_bonsai.cu）で一度だけ変換し GPU 常駐キャッシュ化:
+ *         Q1_0 → BF16 復元 → NVFP4 (E2M1) + block scale (UE4M3) へ量子化（fp4_gemm.cu）。
+ *   - 推論時（gpu_forward / gpu_forward_prefill 内の gpu_mm・gpu_mm_batch）:
+ *       F32 活性化を BF16 へ変換し fp4_bonsai_mm → fp4_gemm_run_cached。
+ *       重み側はキャッシュ済み FP4、活性化側のみ都度 NVFP4 化して CUTLASS GEMM を実行。
+ *       出力 BF16 を F32 へ戻して以降の norm / RoPE / Attention / SwiGLU は従来どおり。
+ *   - FP4 無効（make run.no-fp4）では上記を使わず Q8_0 + Q1_0 カーネル処理のまま。
+ *
  * チャット: GGUF tokenizer.chat_template（Qwen3）の user + 空 think ブロック付き assistant 開始。
  */
 

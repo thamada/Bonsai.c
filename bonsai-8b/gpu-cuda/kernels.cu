@@ -13,6 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef BONSAI_FP4
+#include "fp4_bonsai.h"
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -20,8 +24,12 @@
 #define DT_Q1_0 41
 
 /* Flash Attention: K/V タイルを shared memory に staging（head_dim=128 固定）。
- * shared ≈ 2×FA_BR×FA_HD + q/o/scores/red ≈ 65 KB → carveout opt-in で 48 KB 超を許可。 */
+ * shared ≈ 2×FA_BR×FA_HD + q/o/scores/red。
+ * FA_BR=64 → ≈65 KB（Ampere/Ada は carveout で 48 KB 超可）。
+ * FA_BR=32 → ≈34 KB（Blackwell sm_120 の静的 shared 上限 48 KB 以内）。 */
+#ifndef FA_BR
 #define FA_BR  64
+#endif
 #define FA_HD  128   /* Bonsai-8B head_dim */
 
 static __device__ float fa_sh_reduce_max(float val, float *red_sh)
@@ -668,6 +676,42 @@ static void dev_free_layers(DevLayerBuf *lb)
     lb->n_layers = 0;
 }
 
+#ifdef BONSAI_FP4
+static void dev_free_fp4_layers(DevLayerBuf *lb)
+{
+    if (!lb) return;
+    for (int l = 0; l < lb->n_layers; l++)
+        if (lb->layer && lb->layer[l])
+            fp4_bonsai_free_weight(lb->layer[l]);
+    free(lb->layer);
+    free(lb->bytes);
+    lb->layer = NULL;
+    lb->bytes = NULL;
+    lb->n_layers = 0;
+}
+static DevLayerBuf dev_upload_fp4_q1_layers(int n_layers, const void * const *host_ptrs,
+    int n_in, int n_out)
+{
+    DevLayerBuf lb = { NULL, NULL, n_layers };
+    size_t row_stride = (size_t)(n_in / GPU_QK1_0) * sizeof(GpuBlockQ1_0);
+    lb.layer = (void **)calloc((size_t)n_layers, sizeof(void *));
+    lb.bytes = (size_t *)calloc((size_t)n_layers, sizeof(size_t));
+    for (int l = 0; l < n_layers; l++) {
+        lb.layer[l] = fp4_bonsai_weight_from_q1_host(host_ptrs[l], n_out, n_in, row_stride);
+        if (!lb.layer[l]) {
+            fprintf(stderr, "FP4 weight upload failed layer %d (%dx%d)\n", l, n_out, n_in);
+            exit(1);
+        }
+    }
+    return lb;
+}
+
+static void gpu_mm_fp4(float *o, const float *x, void *weight, int n, int d, int M)
+{
+    fp4_bonsai_mm(weight, x, o, M, n, d);
+}
+#endif
+
 static void gpu_mm_q1_0(GpuModel *gm, float *o, const float *x, const void *W, int n, int d)
 {
     int nb = n / GPU_QK1_0;
@@ -681,7 +725,11 @@ static void gpu_mm_q1_0(GpuModel *gm, float *o, const float *x, const void *W, i
 static void gpu_mm(GpuModel *gm, float *o, const float *x, const void *W, int n, int d, int type)
 {
     if (type == DT_Q1_0) {
+#ifdef BONSAI_FP4
+        gpu_mm_fp4(o, x, (void *)W, n, d, 1);
+#else
         gpu_mm_q1_0(gm, o, x, W, n, d);
+#endif
         return;
     }
     fprintf(stderr, "gpu_mm: unsupported type %d (Bonsai Q1_0 expected)\n", type);
@@ -705,7 +753,11 @@ static void gpu_mm_batch(GpuModel *gm, float *o, const float *x, const void *W,
     int n, int d, int type, int n_tokens)
 {
     if (type == DT_Q1_0) {
+#ifdef BONSAI_FP4
+        gpu_mm_fp4(o, x, (void *)W, n, d, n_tokens);
+#else
         gpu_mm_q1_0_batch(gm, o, x, W, n, d, n_tokens);
+#endif
         return;
     }
     fprintf(stderr, "gpu_mm_batch: unsupported type %d\n", type);
@@ -798,6 +850,28 @@ GpuModel *gpu_model_create(const GpuConfig *cfg, const GpuWeightsHost *host)
     gm->k_norm   = dev_upload_f32_layers(L, host->k_norm, hd);
     gm->norm_ffn = dev_upload_f32_layers(L, host->norm_ffn, dim);
 
+#ifdef BONSAI_FP4
+    {
+        int max_M = ((max_seq + 127) / 128) * 128;
+        if (max_M < 128) max_M = 128;
+        int max_K = ((dim + 127) / 128) * 128;
+        int max_N = ((vocab + 127) / 128) * 128;
+        if (hidden > max_K) max_K = ((hidden + 127) / 128) * 128;
+        if (fp4_bonsai_init(max_M, max_N, max_K) != 0) {
+            fprintf(stderr, "FP4 init failed (max_M=%d max_N=%d max_K=%d)\n",
+                    max_M, max_N, max_K);
+            exit(1);
+        }
+        printf("GPU: FP4 Tensor Core path enabled (NVFP4, CUTLASS sm_120)\n");
+    }
+    gm->wq   = dev_upload_fp4_q1_layers(L, host->wq, dim, dim);
+    gm->wk   = dev_upload_fp4_q1_layers(L, host->wk, dim, kv_dim);
+    gm->wv   = dev_upload_fp4_q1_layers(L, host->wv, dim, kv_dim);
+    gm->wo   = dev_upload_fp4_q1_layers(L, host->wo, dim, dim);
+    gm->gate = dev_upload_fp4_q1_layers(L, host->gate, dim, hidden);
+    gm->up   = dev_upload_fp4_q1_layers(L, host->up, dim, hidden);
+    gm->down = dev_upload_fp4_q1_layers(L, host->down, hidden, dim);
+#else
     gm->wq   = dev_upload_q1_layers(L, host->wq, dim, dim);
     gm->wk   = dev_upload_q1_layers(L, host->wk, dim, kv_dim);
     gm->wv   = dev_upload_q1_layers(L, host->wv, dim, kv_dim);
@@ -805,9 +879,18 @@ GpuModel *gpu_model_create(const GpuConfig *cfg, const GpuWeightsHost *host)
     gm->gate = dev_upload_q1_layers(L, host->gate, dim, hidden);
     gm->up   = dev_upload_q1_layers(L, host->up, dim, hidden);
     gm->down = dev_upload_q1_layers(L, host->down, hidden, dim);
+#endif
 
     gm->out_t = host->out_t;
+#ifdef BONSAI_FP4
+    {
+        size_t row_stride = (size_t)(dim / GPU_QK1_0) * sizeof(GpuBlockQ1_0);
+        gm->out.ptr = fp4_bonsai_weight_from_q1_host(host->out, vocab, dim, row_stride);
+        gm->out.bytes = 0;
+    }
+#else
     gm->out = dev_upload(host->out, q1_0_tensor_bytes(dim, vocab));
+#endif
     gm->norm_out = dev_upload(host->norm_out, (size_t)dim * sizeof(float));
 
     int max_n = dim > hidden ? dim : hidden;
@@ -860,6 +943,15 @@ void gpu_model_destroy(GpuModel *gm)
     dev_free_layers(&gm->q_norm);
     dev_free_layers(&gm->k_norm);
     dev_free_layers(&gm->norm_ffn);
+#ifdef BONSAI_FP4
+    dev_free_fp4_layers(&gm->wq);
+    dev_free_fp4_layers(&gm->wk);
+    dev_free_fp4_layers(&gm->wv);
+    dev_free_fp4_layers(&gm->wo);
+    dev_free_fp4_layers(&gm->gate);
+    dev_free_fp4_layers(&gm->up);
+    dev_free_fp4_layers(&gm->down);
+#else
     dev_free_layers(&gm->wq);
     dev_free_layers(&gm->wk);
     dev_free_layers(&gm->wv);
@@ -867,8 +959,14 @@ void gpu_model_destroy(GpuModel *gm)
     dev_free_layers(&gm->gate);
     dev_free_layers(&gm->up);
     dev_free_layers(&gm->down);
-    dev_free(&gm->norm_out);
+#endif
+#ifdef BONSAI_FP4
+    if (gm->out.ptr) fp4_bonsai_free_weight(gm->out.ptr);
+    fp4_bonsai_shutdown();
+#else
     dev_free(&gm->out);
+#endif
+    dev_free(&gm->norm_out);
     free(gm->wq_t); free(gm->wk_t); free(gm->wv_t); free(gm->wo_t);
     free(gm->gate_t); free(gm->up_t); free(gm->down_t);
     cudaFree(gm->x); cudaFree(gm->xb); cudaFree(gm->xb2);
