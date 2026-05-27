@@ -808,7 +808,7 @@ Do **not** compare these numbers directly to the **CPU table** (`-p "Hello" -n 1
 
 **`bonsai-8b/gpu-rocm-wmma/` is also an appendix.** It derives from **`gpu-rocm`** and accelerates **Prefill Attention QK^T** only with **rocWMMA 16×16×16** (**`flash_attn_prefill_wmma_gqa_kernel`**). **Decode** and linear layers (Q1_0 GEMV) match **`gpu-rocm`**. **hipBLAS is not required.** **`make log` / `make log.push`** use the same format as **`gpu-rocm`**.
 
-**PV (scores × V)** in prefill stays on an F32 scalar path (WMMA not used—matrix layout constraints). On short prompts, prefill tok/s can be **lower than `gpu-rocm`** because of 16-row query blocking. See the header comment in **`kernels.hip`** and **`doc/design.md`**.
+**PV (scores × V)** in prefill stays on an F32 scalar path (WMMA not used—matrix layout constraints). Prefill / decode / total performance is **GPU-dependent** (**gfx1201** may show lower prefill than **`gpu-rocm`**; **gfx1100** may show higher total). See the header comment in **`kernels.hip`** and **`doc/design.md`**.
 
 ### Directory layout
 
@@ -840,13 +840,17 @@ make run
 
 | Item | Value |
 |---|---|
-| GPU | **AMD gfx1201** |
+| GPU | **gfx1201** / **gfx1100** etc. (**`GPU_ARCH`**; see **GPU_ARCH** column in the table) |
 | Workload | Same as the **`gpu-rocm`** table above (130 + 128 tokens) |
 | Reproduce | **`make log.push`** then **`make log`** |
 
-| Timestamp | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
-|---|---:|---:|---:|---|
-| 2026-05-27 21:00 | **170.18** | **42.04** | **67.74** | Prefill QK^T via rocWMMA; prefill slightly below **`gpu-rocm`** (~175 tok/s) at same workload |
+| Timestamp | GPU_ARCH | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
+|---|---|---:|---:|---:|---|
+| 2026-05-27 21:00 | **gfx1201** | **170.18** | **42.04** | **67.74** | Prefill QK^T via rocWMMA; prefill slightly below **`gpu-rocm`** (~175 tok/s) at same workload |
+| 2026-05-27 21:44 | **gfx1100** | **199.00** | **49.01** | **79.02** | 130+128 tokens (different GPU/host than **gfx1201** rows) |
+| 2026-05-27 21:44 | **gfx1100** | **199.90** | **49.29** | **79.45** | Same setup (2nd run) |
+
+**GPU_ARCH** values denote different GPUs and hosts—compare like with like within the table and against the **`gpu-rocm`** table. On **gfx1100**, decode / total can exceed **`gpu-rocm`** (total **~76** tok/s).
 
 ### Source files to read
 
