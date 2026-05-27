@@ -34,7 +34,7 @@ static __device__ float fa_sh_reduce_max(float val, float *red_sh)
 {
     red_sh[threadIdx.x] = val;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) red_sh[threadIdx.x] = fmaxf(red_sh[threadIdx.x], red_sh[threadIdx.x + s]);
         __syncthreads();
     }
@@ -45,7 +45,7 @@ static __device__ float fa_sh_reduce_sum(float val, float *red_sh)
 {
     red_sh[threadIdx.x] = val;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) red_sh[threadIdx.x] += red_sh[threadIdx.x + s];
         __syncthreads();
     }
@@ -77,7 +77,7 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
     __shared__ float scores[FA_BR];
     __shared__ float red_sh[FA_HD];
 
-    if (threadIdx.x < hd) {
+    if ((int)threadIdx.x < hd) {
         q_sh[threadIdx.x] = qh[threadIdx.x];
         o_sh[threadIdx.x] = 0.0f;
     }
@@ -99,7 +99,7 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
         }
         __syncthreads();
 
-        if (threadIdx.x < tc) {
+        if ((int)threadIdx.x < tc) {
             float s = 0.0f;
             for (int d = 0; d < hd; d++)
                 s += q_sh[d] * k_tile[threadIdx.x][d];
@@ -108,24 +108,24 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
         __syncthreads();
 
         float m_tile = fa_sh_reduce_max(
-            (threadIdx.x < tc) ? scores[threadIdx.x] : -1e30f, red_sh);
+            ((int)threadIdx.x < tc) ? scores[threadIdx.x] : -1e30f, red_sh);
         __syncthreads();
 
         float m_new = fmaxf(m, m_tile);
         float alpha = (m > -1e29f) ? expf(m - m_new) : 0.0f;
 
-        if (threadIdx.x < hd)
+        if ((int)threadIdx.x < hd)
             o_sh[threadIdx.x] *= alpha;
 
-        if (threadIdx.x < tc)
+        if ((int)threadIdx.x < tc)
             scores[threadIdx.x] = expf(scores[threadIdx.x] - m_new);
         __syncthreads();
 
         float l_tile = fa_sh_reduce_sum(
-            (threadIdx.x < tc) ? scores[threadIdx.x] : 0.0f, red_sh);
+            ((int)threadIdx.x < tc) ? scores[threadIdx.x] : 0.0f, red_sh);
         __syncthreads();
 
-        if (threadIdx.x < hd) {
+        if ((int)threadIdx.x < hd) {
             float acc = 0.0f;
             for (int j = 0; j < tc; j++)
                 acc += scores[j] * v_tile[j][threadIdx.x];
@@ -137,7 +137,7 @@ static __global__ void flash_attn_gqa_kernel(float *xb, const float *q,
         m = m_new;
     }
 
-    if (threadIdx.x < hd)
+    if ((int)threadIdx.x < hd)
         oh[threadIdx.x] = o_sh[threadIdx.x] / l;
 }
 
@@ -168,7 +168,7 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
     __shared__ float scores[FA_BR];
     __shared__ float red_sh[FA_HD];
 
-    if (threadIdx.x < hd) {
+    if ((int)threadIdx.x < hd) {
         q_sh[threadIdx.x] = qh[threadIdx.x];
         o_sh[threadIdx.x] = 0.0f;
     }
@@ -189,7 +189,7 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
         }
         __syncthreads();
 
-        if (threadIdx.x < tc) {
+        if ((int)threadIdx.x < tc) {
             float s = 0.0f;
             for (int d = 0; d < hd; d++)
                 s += q_sh[d] * k_tile[threadIdx.x][d];
@@ -198,24 +198,24 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
         __syncthreads();
 
         float m_tile = fa_sh_reduce_max(
-            (threadIdx.x < tc) ? scores[threadIdx.x] : -1e30f, red_sh);
+            ((int)threadIdx.x < tc) ? scores[threadIdx.x] : -1e30f, red_sh);
         __syncthreads();
 
         float m_new = fmaxf(m, m_tile);
         float alpha = (m > -1e29f) ? expf(m - m_new) : 0.0f;
 
-        if (threadIdx.x < hd)
+        if ((int)threadIdx.x < hd)
             o_sh[threadIdx.x] *= alpha;
 
-        if (threadIdx.x < tc)
+        if ((int)threadIdx.x < tc)
             scores[threadIdx.x] = expf(scores[threadIdx.x] - m_new);
         __syncthreads();
 
         float l_tile = fa_sh_reduce_sum(
-            (threadIdx.x < tc) ? scores[threadIdx.x] : 0.0f, red_sh);
+            ((int)threadIdx.x < tc) ? scores[threadIdx.x] : 0.0f, red_sh);
         __syncthreads();
 
-        if (threadIdx.x < hd) {
+        if ((int)threadIdx.x < hd) {
             float acc = 0.0f;
             for (int j = 0; j < tc; j++)
                 acc += scores[j] * v_tile[j][threadIdx.x];
@@ -227,7 +227,7 @@ static __global__ void flash_attn_prefill_gqa_kernel(float *xb, const float *q,
         m = m_new;
     }
 
-    if (threadIdx.x < hd)
+    if ((int)threadIdx.x < hd)
         oh[threadIdx.x] = o_sh[threadIdx.x] / l;
 }
 
@@ -411,7 +411,7 @@ static __global__ void rmsnorm_kernel(float *o, const float *x, const float *w, 
         ss += x[i] * x[i];
     shmem[threadIdx.x] = ss;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) shmem[threadIdx.x] += shmem[threadIdx.x + s];
         __syncthreads();
     }
@@ -432,7 +432,7 @@ static __global__ void rmsnorm_head_kernel(float *vec, const float *w,
     __shared__ float shmem[256];
     shmem[threadIdx.x] = ss;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) shmem[threadIdx.x] += shmem[threadIdx.x + s];
         __syncthreads();
     }
@@ -456,7 +456,7 @@ static __global__ void rmsnorm_batch_kernel(float *o, const float *x, const floa
         ss += xin[i] * xin[i];
     shmem[threadIdx.x] = ss;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) shmem[threadIdx.x] += shmem[threadIdx.x + s];
         __syncthreads();
     }
@@ -480,7 +480,7 @@ static __global__ void rmsnorm_head_batch_kernel(float *vec, const float *w,
     __shared__ float shmem[256];
     shmem[threadIdx.x] = ss;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) shmem[threadIdx.x] += shmem[threadIdx.x + s];
         __syncthreads();
     }
@@ -701,7 +701,7 @@ static DevLayerBuf dev_upload_q1_layers(int n_layers, const void * const *host_p
 
 static void dev_free(DevBuf *b)
 {
-    if (b && b->ptr) hipFree(b->ptr);
+    if (b && b->ptr) (void)hipFree(b->ptr);
     if (b) { b->ptr = NULL; b->bytes = 0; }
 }
 
@@ -709,7 +709,7 @@ static void dev_free_layers(DevLayerBuf *lb)
 {
     if (!lb) return;
     for (int l = 0; l < lb->n_layers; l++)
-        if (lb->layer && lb->layer[l]) hipFree(lb->layer[l]);
+        if (lb->layer && lb->layer[l]) (void)hipFree(lb->layer[l]);
     free(lb->layer);
     free(lb->bytes);
     lb->layer = NULL;
@@ -928,25 +928,25 @@ void gpu_model_destroy(GpuModel *gm)
     dev_free(&gm->norm_out);
     free(gm->wq_t); free(gm->wk_t); free(gm->wv_t); free(gm->wo_t);
     free(gm->gate_t); free(gm->up_t); free(gm->down_t);
-    hipFree(gm->x); hipFree(gm->xb); hipFree(gm->xb2);
-    hipFree(gm->hb); hipFree(gm->hb2);
-    hipFree(gm->q); hipFree(gm->k); hipFree(gm->v);
-    hipFree(gm->logits);
-    hipFree(gm->kc); hipFree(gm->vc);
-    hipFree(gm->q8);
-    hipFree(gm->rope_cache);
+    (void)hipFree(gm->x); (void)hipFree(gm->xb); (void)hipFree(gm->xb2);
+    (void)hipFree(gm->hb); (void)hipFree(gm->hb2);
+    (void)hipFree(gm->q); (void)hipFree(gm->k); (void)hipFree(gm->v);
+    (void)hipFree(gm->logits);
+    (void)hipFree(gm->kc); (void)hipFree(gm->vc);
+    (void)hipFree(gm->q8);
+    (void)hipFree(gm->rope_cache);
     free(gm->h_rope);
-    hipFree(gm->x_batch);
-    hipFree(gm->xb_batch);
-    hipFree(gm->xb2_batch);
-    hipFree(gm->q_batch);
-    hipFree(gm->k_batch);
-    hipFree(gm->v_batch);
-    hipFree(gm->hb_batch);
-    hipFree(gm->hb2_batch);
-    hipFree(gm->q8_batch);
-    hipFree(gm->rope_batch);
-    hipFree(gm->tokens_dev);
+    (void)hipFree(gm->x_batch);
+    (void)hipFree(gm->xb_batch);
+    (void)hipFree(gm->xb2_batch);
+    (void)hipFree(gm->q_batch);
+    (void)hipFree(gm->k_batch);
+    (void)hipFree(gm->v_batch);
+    (void)hipFree(gm->hb_batch);
+    (void)hipFree(gm->hb2_batch);
+    (void)hipFree(gm->q8_batch);
+    (void)hipFree(gm->rope_batch);
+    (void)hipFree(gm->tokens_dev);
     free(gm->h_rope_batch);
     free(gm);
 }
