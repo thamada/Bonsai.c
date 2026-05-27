@@ -117,7 +117,7 @@
 
 | 項目 | 値 |
 |------|-----|
-| GPU | **gfx1201**（ROCm。**`rocminfo` → `GPU_ARCH`**） |
+| GPU | **gfx1201** / **gfx1100** 等（ROCm。**`rocminfo` → `GPU_ARCH`**。表の **GPU_ARCH** 列） |
 | OS | Linux（計測ホスト名例: コンテナ ID） |
 | モデル | `Bonsai-8B-Q1_0.gguf` |
 | ワークロード | 長文プロンプト（ChatML 後 **130** トークン）+ decode **128** トークン（**`-n 128 -t 0 -s 42`**。`gpu-rocm/Makefile` の **`BENCH_PROMPT`** / **`BENCH_N`** 既定） |
@@ -125,13 +125,14 @@
 | 表の指標（total） | **`/tmp/benchmark.log`**（または **`BENCH_LOG_FILE`**）の **`total_tps`** — **prefill+decode の推論区間**（**重みの H2D（`gpu_model_create`）は含めない**） |
 | 再現 | `bonsai-8b/gpu-rocm/` で **`make log.push`**（実行後 **`make log`** で履歴表示。結果は **`Makefile` 内の `BENCH_LOG +=` 行**に追記） |
 
-| 計測日時（抜粋） | prefill tok/s | decode tok/s | total tok/s | 備考 |
-|----------------|-------------:|-------------:|------------:|------|
-| 2026-05-27 17:21 | **175.03** | **41.89** | **67.92** | gfx1201、130+128 トークン |
-| 2026-05-27 17:29 | **174.18** | **42.06** | **68.08** | 同上（2 回目） |
-| 2026-05-27 19:15 | **174.76** | **41.95** | **67.98** | 同上（3 回目） |
+| 計測日時 | GPU_ARCH | prefill tok/s | decode tok/s | total tok/s | 備考 |
+|----------------|----------|-------------:|-------------:|------------:|------|
+| 2026-05-27 17:21 | **gfx1201** | **175.03** | **41.89** | **67.92** | 130+128 トークン |
+| 2026-05-27 17:29 | **gfx1201** | **174.18** | **42.06** | **68.08** | 同上（2 回目） |
+| 2026-05-27 19:15 | **gfx1201** | **174.76** | **41.95** | **67.98** | 同上（3 回目） |
+| 2026-05-27 21:40 | **gfx1100** | **206.40** | **46.22** | **75.90** | 130+128 トークン（**gfx1201** ホストとは別 GPU・別ホスト） |
 
-短プロンプト（`-p "Hello" -n 16 -t 0`）の CPU/CUDA 表とは**直接比較しない**（トークン数・prefill 長が異なる）。短いプロンプトの参考計測は手動実行と stderr の throughput 行で行う。
+短プロンプト（`-p "Hello" -n 16 -t 0`）の CPU/CUDA 表とは**直接比較しない**（トークン数・prefill 長が異なる）。**GPU_ARCH** 列（**gfx1201** vs **gfx1100**）は計測 GPU・ホストが異なるため、表内でも**横並び比較は GPU 条件を揃えてから**行う。短いプロンプトの参考計測は手動実行と stderr の throughput 行で行う。
 
 #### GPU ROCm WMMA（2026-05-27 計測、`gpu-rocm-wmma` **`make log.push`**）
 
@@ -604,7 +605,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 - **CPU 3 バリアント**は **`Bonsai-8B-Q1_0.gguf` 専用**（線形重み **Q1_0** + norm **F32**）。**Q4_K / IQ2_S / IQ3_S 等**の汎用逆量子化パスは **2026-05-27 削除**。他 GGUF は **`expect_q1_0_weight`** / **`mm`** でエラー終了。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする（Makefile は **AVX2 不可なら `-mavx` または `-march=x86-64`**）。**`-ffast-math`** と **FMA 対応時の `-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。長プロンプト **`make log.push`** では **`avx2+fma`** と **`avx`** で total tok/s が大きく異なりうる（上記 CPU 長プロンプト表）。旧 **`-march=native`** 固定は廃止（クロスビルド・非 x86 ホストでは **`ARCH_FLAGS`** を明示指定）。**`make log.push`** は **`cpu-blas/Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-cuda`**（付録・NVIDIA）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考（2026-05-21）: **`make run`（NVFP4）** prefill **~1365 tok/s**、decode **~90.4 tok/s**；**`make run.no-fp4`** prefill **~293 tok/s**、decode **~47.0 tok/s**。**`make run.no-fp4`** 既定は PTX **`compute_86`**。**`make run`** は **CUDA 13**・**`sm_120a`**・**CUTLASS**・**`BONSAI_FP4=1`**（**`make blackwell`**、要 **sudo** のことがある）。Blackwell の静的 shared 上限 **48 KB** のため **`FA_BR=32`**（**`FA_BR=64`** はコンパイル不可）。**VRAM** に prefill バッチ（**`max_seq` 分**）と FP4 重みキャッシュを含む。**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
-- **`gpu-rocm`**（付録・AMD）: **ROCm**・**`hipcc`**・AMD GPU 実機が必要。本書「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」参照。**hipBLAS 不要**。**NVFP4 非対応**。**`GPU_ARCH`** は **`rocminfo`** 自動（未検出時は手動指定）。**`g++` / `libstdc++-dev`** 必須。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`** 制約は **`gpu-cuda`** と同趣旨。参考ベンチマーク: 上記 **GPU ROCm 表**（gfx1201・長プロンプト 130 + 生成 128）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
+- **`gpu-rocm`**（付録・AMD）: **ROCm**・**`hipcc`**・AMD GPU 実機が必要。本書「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」参照。**hipBLAS 不要**。**NVFP4 非対応**。**`GPU_ARCH`** は **`rocminfo`** 自動（未検出時は手動指定）。**`g++` / `libstdc++-dev`** 必須。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`** 制約は **`gpu-cuda`** と同趣旨。参考ベンチマーク: 上記 **GPU ROCm 表**（**gfx1201** / **gfx1100** 等・長プロンプト 130 + 生成 128。**GPU_ARCH** ごとにホストが異なる場合あり）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-rocm-wmma`**（付録・AMD・実験）: **`gpu-rocm`** 要件に加え **rocWMMA**（ROCm 同梱ヘッダ）。Prefill Attention QK^T の WMMA 化のみ。**短プロンプトでは `gpu-rocm` より Prefill が遅い場合あり**（README 付録・本書 **GPU ROCm WMMA 表**）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。

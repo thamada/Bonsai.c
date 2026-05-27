@@ -775,7 +775,7 @@ make log               # print BENCH_LOG entries as a table
 
 | Item | Value |
 |---|---|
-| GPU | **AMD gfx1201** (ROCm, **`GPU_ARCH`**) |
+| GPU | **gfx1201** / **gfx1100** etc. (ROCm, **`GPU_ARCH`**; see **GPU_ARCH** column in the table) |
 | OS | Linux |
 | Model | `Bonsai-8B-Q1_0.gguf` |
 | Workload | Long prompt (**130** tokens after ChatML) + **128** decode tokens (**`make log.push`** defaults: **`-n 128 -t 0 -s 42`**) |
@@ -783,13 +783,14 @@ make log               # print BENCH_LOG entries as a table
 | Metrics (total) | Benchmark log **`total_tps`** (inference window; weight H2D excluded) |
 | Reproduce | In **`bonsai-8b/gpu-rocm/`**: **`make log.push`** then **`make log`** |
 
-| Timestamp | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
-|---|---:|---:|---:|---|
-| 2026-05-27 17:21 | **175.03** | **41.89** | **67.92** | gfx1201, 130+128 tokens |
-| 2026-05-27 17:29 | **174.18** | **42.06** | **68.08** | Same setup (2nd run) |
-| 2026-05-27 19:15 | **174.76** | **41.95** | **67.98** | Same setup (3rd run) |
+| Timestamp | GPU_ARCH | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
+|---|---|---:|---:|---:|---|
+| 2026-05-27 17:21 | **gfx1201** | **175.03** | **41.89** | **67.92** | 130+128 tokens |
+| 2026-05-27 17:29 | **gfx1201** | **174.18** | **42.06** | **68.08** | Same setup (2nd run) |
+| 2026-05-27 19:15 | **gfx1201** | **174.76** | **41.95** | **67.98** | Same setup (3rd run) |
+| 2026-05-27 21:40 | **gfx1100** | **206.40** | **46.22** | **75.90** | 130+128 tokens (different GPU/host than **gfx1201** rows) |
 
-Do **not** compare these numbers directly to the **CPU table** (`-p "Hello" -n 16`) or the **CUDA appendix** (prefill 18 + decode 16)—prompt length and token counts differ. For short prompts, run `./bonsai-gpu-rocm ... -p "Hello" -n 16 -t 0` manually and read stderr **`--- throughput ---`**.
+Do **not** compare these numbers directly to the **CPU table** (`-p "Hello" -n 16`) or the **CUDA appendix** (prefill 18 + decode 16)—prompt length and token counts differ. **GPU_ARCH** values (**gfx1201** vs **gfx1100**) denote different GPUs and hosts—compare like with like within the table. For short prompts, run `./bonsai-gpu-rocm ... -p "Hello" -n 16 -t 0` manually and read stderr **`--- throughput ---`**.
 
 ### Troubleshooting (ROCm build)
 
