@@ -16,6 +16,8 @@ bonsai-8b/gpu-cuda/*.o
 bonsai-8b/gpu-cuda/third_party/
 bonsai-8b/gpu-rocm/bonsai-gpu-rocm
 bonsai-8b/gpu-rocm/*.o
+bonsai-8b/gpu-rocm-wmma/bonsai-gpu-rocm-wmma
+bonsai-8b/gpu-rocm-wmma/*.o
 bonsai-8b/cpu/qwen3-cpu
 # 誤って bonsai-8b/ 直下に生成された古いバイナリ（無視）
 bonsai-8b/qwen3-cpu

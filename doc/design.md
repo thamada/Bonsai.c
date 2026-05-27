@@ -10,11 +10,13 @@
 
 **PyTorch・TensorFlow・JAX・ONNX Runtime 等の ML ユーザランドにはリンクしない。** 基準経路のコアは **標準 C と `libm`** のみ。旧 **単一 `main-rocm*.c` / XDNA2 NPU** 経路は削除済み。**AMD Radeon** 向け **`bonsai-8b/gpu-rocm/`**（**HIP**・**`hipcc`**）を **付録**として新設する（**`gpu-cuda`** と同趣旨の Q1_0 + Q8_0 GEMV・Flash Attention・prefill バッチ）。
 
-**CPU** については、**参照実装**として **`bonsai-8b/cpu/main.c`（単スレッド）** を保守し、**同ロジックを OpenMP で並列化した `bonsai-8b/cpu-omp/main.c`**（**`bonsai-cpu-omp`**）を検証用に、**OpenMP + OpenBLAS と Q1_0×Q8_0 SIMD 内積**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠）を用いた **`bonsai-8b/cpu-blas/main.c`**（**`bonsai-cpu-blas`**）を CPU 実用スループット向けに提供する。
+**CPU** については、**参照実装**として **`bonsai-8b/cpu/main.c`（単スレッド）** を保守し、**同ロジックを OpenMP で並列化した `bonsai-8b/cpu-omp/main.c`**（**`bonsai-cpu-omp`**）を検証用に、**OpenMP + OpenBLAS と Q1_0×Q8_0 SIMD 内積**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠）を用いた **`bonsai-8b/cpu-blas/main.c`**（**`bonsai-cpu-blas`**）を CPU 実用スループット向けに提供する。**`cpu-blas`** も **`make log` / `make log.push`** で長プロンプトベンチ履歴を **`cpu-blas/Makefile` に記録**（第 2 列は **`BENCH_SIMD`** = **`ARCH_FLAGS`** の短縮ラベル）。
 
 **`bonsai-8b/gpu-cuda/`**（**`main.c`** + **`kernels.cu`** + **`gpu.h`**、任意で **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + CUTLASS → **`bonsai-gpu-cuda`**）は **CUDA Runtime のみ（`libcudart`）** の **付録実装**（NVIDIA）。README 上は **プロジェクト目的（単一 C・依存最小）の外**と明記し、**将来別リポジトリへ移す予定**。技術メモ・ビルド手順・GPU ベンチマークは README 末尾の **「NVIDIA CUDA 実装（`gpu-cuda`）について」** 付録に、仕様の静的説明は本書に記載。**Prefill** は **`gpu_forward_prefill`**（バッチ並列）、**Decode** は **`gpu_forward`**（1 トークンずつ）。Blackwell 向け **`make run`**（**`BONSAI_FP4=1`**）では線形層のみ **NVFP4 + CUTLASS**（本書「NVFP4 + CUTLASS」）。
 
 **`bonsai-8b/gpu-rocm/`**（**`main.c`** + **`kernels.hip`** + **`gpu.h`** → **`bonsai-gpu-rocm`**）は **ROCm HIP のみ（`libamdhip64`）** の **付録実装**（AMD）。**`gpu-cuda`** とほぼ同一の **`gpu.h` C API**（追加 **`gpu_get_device_desc`**）・GGUF・CLI・**`chat_encode`**・RoPE・prefill/decode 分割。**`make log` / `make log.push`** でベンチ履歴を **`Makefile` に記録**。**hipBLAS 不要**。**NVFP4 経路なし**。ビルドは **`hipcc`**、**`GPU_ARCH`** は **`rocminfo`** から **`gfx*`** を自動検出（上書き可）。
+
+**`bonsai-8b/gpu-rocm-wmma/`**（**`main.c`** + **`kernels.hip`** + **`gpu.h`** → **`bonsai-gpu-rocm-wmma`**）は **`gpu-rocm`** の派生。**Prefill Attention** の **QK^T** のみ **rocWMMA 16×16×16**（**`flash_attn_prefill_wmma_gqa_kernel`**）で加速。**Decode**・線形層（Q1_0 GEMV）は **`gpu-rocm`** と同一。**hipBLAS 不要**。**`make log` / `make log.push`** は **`gpu-rocm`** と同形式。
 
 目的は、推論経路（GGUF 読み取り・量子化復元・Transformer forward・サンプリング）を **C の明示的なコードパス**として追い、改変しやすくすることである。学習・商用 SLA・公式実装との数値一致はスコープ外。
 
@@ -35,6 +37,7 @@
 | `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は活性化を **Q8_0** 化して **`vec_dot_q1_0_q8_0`**（AVX2 時は ggml-cpu x86 準拠 SIMD、**`-mfma`**）。Attention はヘッドあたり **2 回の `cblas_sgemv`**。F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
 | `bonsai-8b/gpu-cuda/main.c` + **`kernels.cu`** | **NVIDIA GPU、CUDA（付録）** | 上記 CPU 3 バリアントと**同趣旨**だが **CUDA 依存**。README 付録参照。NVFP4（Blackwell）オプションあり。 |
 | `bonsai-8b/gpu-rocm/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP（付録）** | **`gpu-cuda`** と同 API・アルゴリズム（Q8_0 活性化 + Q1_0 GEMV、Flash Attention、prefill バッチ）。**hipBLAS 不要**。 |
+| `bonsai-8b/gpu-rocm-wmma/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP + rocWMMA（付録）** | **`gpu-rocm`** 派生。**Prefill** の **QK^T** のみ **rocWMMA 16×16×16**（**PV** は F32 スカラー）。**Decode**・線形層は **`gpu-rocm`** 同一。短プロンプトでは **`gpu-rocm`** より Prefill が遅い場合あり。 |
 
 メタデータの照合は **GGUF 内の `qwen3.*` プレフィックス**（実装上のバイト列。`embedding_length` 等）と tokenizer 系キーで行う。実装コメントは「dense デコーダ」「Bonsai」と整合する。
 
@@ -62,6 +65,23 @@
 | `bonsai-cpu-blas` | 0.5 s | 30.79 tok/s | `-O3 -fopenmp -ffast-math`、**`ARCH_FLAGS`** は **`/proc/cpuinfo` から自動選択**（5950X 計測時 **`-mavx2 -mfma`**）、OpenBLAS 1 スレッド |
 
 この条件下では **`cpu-blas` が `cpu-omp` の約 6 倍**、**`cpu` の約 128 倍**の decode スループット（`cpu-omp` は `cpu` の約 21 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致。`cpu-blas` の Q1_0 は **Q8_0 活性化 + AVX2 内積**（llama.cpp 準拠）。
+
+#### CPU 長プロンプト（2026-05-27 計測、`cpu-blas` **`make log.push`**）
+
+| 項目 | 値 |
+|------|-----|
+| CPU | AVX（**`BENCH_SIMD=avx`**。計測ホストの cpuinfo 自動検出） |
+| OS | Linux |
+| モデル | `Bonsai-8B-Q1_0.gguf` |
+| ワークロード | 長文プロンプト（ChatML 後 **130** トークン）+ decode **128** トークン（**`-n 128 -t 0 -s 42`**。`cpu-blas/Makefile` の **`BENCH_PROMPT`** / **`BENCH_N`** 既定） |
+| 表の指標 | **`/tmp/benchmark.log`**（または **`BENCH_LOG_FILE`**）の **`prefill_tps` / `decode_tps` / `total_tps`** — **推論区間のみ**（モデル mmap 読み込みは含めない） |
+| 再現 | `bonsai-8b/cpu-blas/` で **`make log.push`**（**`make log`** で履歴表示） |
+
+| 計測日時 | SIMD | prefill tok/s | decode tok/s | total tok/s | 備考 |
+|----------------|------|-------------:|-------------:|------------:|------|
+| 2026-05-27 19:39 | **avx** | **1.96** | **1.99** | **1.98** | 130+128 トークン |
+
+短プロンプト CPU 表（5950X・`-p "Hello" -n 16`）とは**直接比較しない**。
 
 #### GPU CUDA（2026-05-21 計測）
 
@@ -111,18 +131,31 @@
 
 短プロンプト（`-p "Hello" -n 16 -t 0`）の CPU/CUDA 表とは**直接比較しない**（トークン数・prefill 長が異なる）。短いプロンプトの参考計測は手動実行と stderr の throughput 行で行う。
 
+#### GPU ROCm WMMA（2026-05-27 計測、`gpu-rocm-wmma` **`make log.push`**）
+
+| 項目 | 値 |
+|------|-----|
+| GPU | **gfx1201**（**`GPU_ARCH`**） |
+| バイナリ | **`bonsai-gpu-rocm-wmma`** |
+| ワークロード | 上記 GPU ROCm 表と同じ（130 + 128 トークン） |
+| 再現 | `bonsai-8b/gpu-rocm-wmma/` で **`make log.push`** |
+
+| 計測日時 | prefill tok/s | decode tok/s | total tok/s | 備考 |
+|----------------|-------------:|-------------:|------------:|------|
+| 2026-05-27 21:00 | **170.18** | **42.04** | **67.74** | Prefill QK^T=rocWMMA。同一条件の **`gpu-rocm`**（prefill **~175 tok/s**）より Prefill はやや低い（WMMA 版は query 16 行ブロック・LDS 増で並列度が下がりうる。`kernels.hip` 先頭コメント参照） |
+
 ## ディレクトリとファイル構成
 
 | パス | 役割 |
 |------|------|
-| `README.md` / `README.en.md` | **入口（日／英）**。**本文**: CPU 3 バリアントのビルド・実行・ベンチマーク・トラブルシュート（`make model` 含む）。**付録**（`---` 以降）: **`gpu-cuda`**（NVIDIA）と **`gpu-rocm`**（AMD）。**`cpu-blas`** の **`ARCH_FLAGS`**（cpuinfo 自動検出）も記載。 |
-| `bonsai-8b/Makefile` | **`model` のみ**（GGUF 取得と SHA256 検証）。**`.DEFAULT_GOAL := model`**。ビルド・実行・**`clean`** は各サブディレクトリの Makefile を直接使用（**`cpu/`**・**`cpu-omp/`**・**`cpu-blas/`**・**`gpu-cuda/`**・**`gpu-rocm/`**）。 |
+| `README.md` / `README.en.md` | **入口（日／英）**。**本文**: CPU 3 バリアントのビルド・実行・ベンチマーク・トラブルシュート（`make model` 含む）。**付録**（`---` 以降）: **`gpu-cuda`**（NVIDIA）、**`gpu-rocm`**（AMD）、**`gpu-rocm-wmma`**（AMD・Prefill WMMA）。**`cpu-blas`** の **`ARCH_FLAGS`**（cpuinfo 自動検出）・**`log`/`log.push`** も記載。 |
+| `bonsai-8b/Makefile` | **`model` のみ**（GGUF 取得と SHA256 検証）。**`.DEFAULT_GOAL := model`**。ビルド・実行・**`clean`** は各サブディレクトリの Makefile を直接使用（**`cpu/`**・**`cpu-omp/`**・**`cpu-blas/`**・**`gpu-cuda/`**・**`gpu-rocm/`**・**`gpu-rocm-wmma/`**）。 |
 | `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-omp/Makefile` | **`bonsai-cpu-omp`** の生成（`-fopenmp`）。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
-| `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、**`-funroll-loops -ffast-math`**）。**`/proc/cpuinfo`** の `flags` から **AVX2 → `-mavx2`（FMA ありなら `-mfma`）**、AVX のみ → **`-mavx`**、それ以外 → **`-march=x86-64`** を **`ARCH_FLAGS`** に自動設定（上書き: **`make build ARCH_FLAGS='-mavx2 -mfma'`**）。ビルド時に **`SIMD flags:`** を表示。`pkg-config openblas` があれば `-I`/`-L` を自動付与。 |
+| `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、**`-funroll-loops -ffast-math`**）。**`/proc/cpuinfo`** の `flags` から **AVX2 → `-mavx2`（FMA ありなら `-mfma`）**、AVX のみ → **`-mavx`**、それ以外 → **`-march=x86-64`** を **`ARCH_FLAGS`** に自動設定（上書き: **`make build ARCH_FLAGS='-mavx2 -mfma'`**）。ビルド時に **`SIMD flags:`** を表示。`pkg-config openblas` があれば `-I`/`-L` を自動付与。**`log`** / **`log.push`**（**`BENCH_SIMD`** 列付き **`BENCH_LOG`** 追記）。 |
 | `bonsai-8b/cpu/main.c` | CPU 単スレッド推論の**参照ソース**（アルゴリズムの正として追う）。**単一 `main.c`**（標準 C + `libm` のみ）。 |
 | `bonsai-8b/cpu-omp/main.c` | **`cpu/main.c` をベースに OpenMP を付与した派生**（挙動確認はまず `cpu` を正とする）。**単一 `main.c`**（+ OpenMP）。 |
-| `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。**単一 `main.c`**（+ OpenMP + OpenBLAS）。 |
+| `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。**単一 `main.c`**（+ OpenMP + OpenBLAS）。終了時 **`write_benchmark_log`**（**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**）。 |
 | `bonsai-8b/gpu-cuda/main.c` | **`cpu-blas` をベースに CPU 演算を GPU API 呼び出しへ置換したホスト側**（GGUF 読み込み・トークナイザ・サンプリングは CPU）。**`gpu.h`** の C API 経由で **`kernels.cu`** を呼ぶ。 |
 | `bonsai-8b/gpu-cuda/kernels.cu` | **CUDA カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV または **`BONSAI_FP4`** 時 NVFP4 経由の **`gpu_mm`**、単トークン／**バッチ** Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`** 等）。 |
 | `bonsai-8b/gpu-cuda/fp4_bonsai.cu` / **`fp4_bonsai.h`** | **Q1_0 → NVFP4 重みキャッシュ**、F32 活性化 ↔ BF16 ↔ **`fp4_gemm_run_cached`** ブリッジ（**`BONSAI_FP4=1`** 時）。 |
@@ -134,11 +167,15 @@
 | `bonsai-8b/gpu-rocm/kernels.hip` | **HIP カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`**、**`gpu_get_device_desc`**）。**`GpuBlockQ1_0` / `GpuBlockQ8_0`** は **`gpu.h`** 定義。 |
 | `bonsai-8b/gpu-rocm/gpu.h` | **`gpu-cuda/gpu.h` をベースに `gpu_get_device_desc` を追加**（`GpuModel`・`gpu_forward*` 等は同一）。 |
 | `bonsai-8b/gpu-rocm/Makefile` | **`bonsai-gpu-rocm`** の生成（**`-Wall -Wextra -Wno-unused-parameter`**、**`hipcc -x hip`**）。**`log`**（**`BENCH_LOG`** 履歴を表形式表示）、**`log.push`**（**`BENCH_PROMPT`**・**`BENCH_N`**・**`BENCH_SEED`** でベンチ実行→ログ解析→**`Makefile` に `BENCH_LOG +=` 追記**）。**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**。 |
+| `bonsai-8b/gpu-rocm-wmma/main.c` | **`gpu-rocm/main.c` をベースにしたホスト側**（GGUF・CLI・**`write_benchmark_log`** 同一）。 |
+| `bonsai-8b/gpu-rocm-wmma/kernels.hip` | **HIP カーネル**（**`gpu-rocm`** 共通部分 + **Prefill** **`flash_attn_prefill_wmma_gqa_kernel`**）。**rocWMMA**（**`#include <rocwmma/rocwmma.hpp>`**）で **QK^T** のみ WMMA。**PV** は F32 スカラー（行列レイアウト都合で WMMA 未採用。`kernels.hip` 先頭に開発知見）。**`blockDim=32`**（wave32）。 |
+| `bonsai-8b/gpu-rocm-wmma/gpu.h` | **`gpu-rocm/gpu.h` と同一**（**`gpu_get_device_desc`** 含む）。 |
+| `bonsai-8b/gpu-rocm-wmma/Makefile` | **`bonsai-gpu-rocm-wmma`** の生成（**`gpu-rocm/Makefile` と同趣旨** + リンク時 **Prefill Attention: rocWMMA** 表示）。**`FA_BR` 既定 32**（WMMA 転置バッファで LDS 増）。**`log` / `log.push`** 形式は **`gpu-rocm`** と同一（第 2 列は **`GPU_ARCH`**）。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL（`blob/main` 形式）。 |
 | `bonsai-8b/Bonsai-8B-Q1_0.gguf.sha256sum` | 既定 GGUF の SHA256 チェックサム（`make model` の検証に使用）。 |
 | `doc/design.md` | 本書。 |
 | `doc/ChangeLog` | 変更履歴。 |
-| `.gitignore` | ビルド生成物（**`bonsai-8b/cpu/bonsai-cpu`**、**`bonsai-8b/cpu-omp/bonsai-cpu-omp`**、**`bonsai-8b/cpu-blas/bonsai-cpu-blas`**、**`bonsai-8b/gpu-cuda/bonsai-gpu-cuda`**、**`bonsai-8b/gpu-cuda/*.o`**、**`bonsai-8b/gpu-rocm/bonsai-gpu-rocm`**、**`bonsai-8b/gpu-rocm/*.o`** 等）、`*.gguf` 等。 |
+| `.gitignore` | ビルド生成物（**`bonsai-8b/cpu/bonsai-cpu`**、**`bonsai-8b/cpu-omp/bonsai-cpu-omp`**、**`bonsai-8b/cpu-blas/bonsai-cpu-blas`**、**`bonsai-8b/gpu-cuda/bonsai-gpu-cuda`**、**`bonsai-8b/gpu-cuda/*.o`**、**`bonsai-8b/gpu-rocm/bonsai-gpu-rocm`**、**`bonsai-8b/gpu-rocm/*.o`**、**`bonsai-8b/gpu-rocm-wmma/bonsai-gpu-rocm-wmma`**、**`bonsai-8b/gpu-rocm-wmma/*.o`** 等）、`*.gguf` 等。 |
 
 ### Make ターゲット（`bonsai-8b/Makefile`）
 
@@ -160,9 +197,10 @@
 |------|------------|------|--------|
 | `bonsai-8b/cpu/Makefile` | `build` / `run` / `clean` | `cpu/bonsai-cpu` | `cpu/main.c` |
 | `bonsai-8b/cpu-omp/Makefile` | `build` / `run` / `clean` | `cpu-omp/bonsai-cpu-omp` | `cpu-omp/main.c` |
-| `bonsai-8b/cpu-blas/Makefile` | `build` / `run` / `clean` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
+| `bonsai-8b/cpu-blas/Makefile` | `build` / `run` / `clean` / **`log`** / **`log.push`** | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
 | `bonsai-8b/gpu-cuda/Makefile` | **`run`**（既定）/ **`run.no-fp4`** / `build` / `clean` / **`blackwell`** | `gpu-cuda/bonsai-gpu-cuda` | `main.c` + `kernels.cu`（FP4 時 + `fp4_*.cu`） |
 | `bonsai-8b/gpu-rocm/Makefile` | **`run`**（既定）/ `build` / `clean` / **`detect-gpu-arch`** / **`log`** / **`log.push`** | `gpu-rocm/bonsai-gpu-rocm` | `main.c` + `kernels.hip`（**`hipcc -x hip`**） |
+| `bonsai-8b/gpu-rocm-wmma/Makefile` | **`run`**（既定）/ `build` / `clean` / **`detect-gpu-arch`** / **`log`** / **`log.push`** | `gpu-rocm-wmma/bonsai-gpu-rocm-wmma` | `main.c` + `kernels.hip`（**rocWMMA** Prefill Attention） |
 
 **各サブディレクトリ Makefile** には **`MODEL`** / **`PROMPT`** があり、`MODEL` の既定は **`../Bonsai-8B-Q1_0.gguf`**（親 **`bonsai-8b/`** の GGUF）。
 
@@ -196,7 +234,7 @@ OpenMP + OpenBLAS 版（推奨）:
 cd bonsai-8b/cpu-blas
 make build
 make run PROMPT="Hello"
-# または ./bonsai-cpu-blas ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+# 長プロンプトベンチ: make log.push → make log
 ```
 
 GPU CUDA 版（NVIDIA）:
@@ -230,6 +268,14 @@ make run                # 既定ターゲット（ビルド＋実行）
 # GPU_ARCH: rocminfo 自動。手動: make GPU_ARCH=gfx1100 build
 ```
 
+GPU ROCm WMMA 版（AMD、Prefill Attention 実験）:
+
+```bash
+cd bonsai-8b/gpu-rocm-wmma
+make run
+# make log.push   # ベンチ履歴を Makefile に追記
+```
+
 ## ビルドと実行（CPU）
 
 単スレッド:
@@ -255,7 +301,20 @@ cd bonsai-8b/cpu-blas
 make build          # SIMD flags: /proc/cpuinfo から自動（例: -mavx2 -mfma）
 ./bonsai-cpu-blas ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 8
 # 手動指定: make build ARCH_FLAGS='-mavx2 -mfma'
+# 長プロンプトベンチ: make log.push → make log
 ```
+
+**`cpu-blas` ベンチマークログ（`log.push`）**:
+
+| 変数 | 既定 | 意味 |
+|------|------|------|
+| `BENCH_PROMPT` | 長文英文（Makefile 内） | ChatML 化後 **約 130 トークン** |
+| `BENCH_N` | `128` | 最大生成トークン数 |
+| `BENCH_SEED` | `42` | 乱数シード |
+| `BENCH_LOG_FILE` | `/tmp/benchmark.log` | key=value ログ出力先 |
+| `BENCH_SIMD` | cpuinfo 自動 | 履歴第 2 列（例: **`avx2+fma`**） |
+
+**`BENCH_LOG` 形式**: **`ISO8601|BENCH_SIMD|hostname|prompt|gen|prefill|decode|total`**。**`total_tps`** は推論区間のみ（モデル mmap 読み込みは含めない）。**`make log.push` は `cpu-blas/Makefile` を書き換える**。
 
 ## ビルドと実行（GPU CUDA）
 
@@ -310,6 +369,35 @@ make run
 4. **`make log`** で **`BENCH_LOG`** 行を表表示。
 
 **`BENCH_LOG` の `total_tps`** は **`generate()` 開始〜終了**の wall time に対する **`(n_prefill + n_decode) / total_sec`** であり、**`gpu_model_create` 以前の重みアップロード時間は含まない**（Makefile コメントと同旨）。
+
+## ビルドと実行（GPU ROCm WMMA）
+
+| 目的 | コマンド（`bonsai-8b/gpu-rocm-wmma/`） |
+|------|----------------------------------------|
+| ビルド＋実行（既定） | **`make`** / **`make run`** |
+| ビルドのみ | **`make build`** |
+| GPU ISA 確認 | **`make detect-gpu-arch`** |
+| ベンチマーク履歴表示 | **`make log`** |
+| ベンチ実行＋履歴追記 | **`make log.push`** |
+
+```bash
+cd bonsai-8b/gpu-rocm-wmma
+make run
+./bonsai-gpu-rocm-wmma ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 8
+```
+
+**要件・ビルド変数**は **`gpu-rocm`** と同一（**ROCm**・**`hipcc`**・**`GPU_ARCH`**・**`g++` / `libstdc++-dev`**）。追加で **rocWMMA** ヘッダ（**`$(ROCM)/include/rocwmma`**）が必要。**`FA_BR` 既定 32**（WMMA 転置バッファで LDS 増。64 は未検証）。
+
+**`gpu-rocm` との差分**:
+
+| 項目 | **`gpu-rocm`** | **`gpu-rocm-wmma`** |
+|------|----------------|---------------------|
+| Prefill Attention QK^T | F32 スカラー（shared staging） | **rocWMMA 16×16×16** |
+| Prefill Attention PV | F32 スカラー | F32 スカラー（WMMA 未採用） |
+| Decode Attention | **`flash_attn_gqa_kernel`** | 同一 |
+| 線形層 | Q1_0×Q8_0 GEMV | 同一 |
+| 正確性 | — | WMMA QK + スカラー PV で **`gpu-rocm` と同等生成を確認** |
+| 性能 | — | 短プロンプトでは Prefill 並列度低下により **`gpu-rocm` より遅い場合あり** |
 
 ## 実行時の挙動（CPU）
 
@@ -431,6 +519,15 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 **`gpu.h`** は **`gpu-cuda` をベースに `gpu_get_device_desc` を追加**（`extern "C"` API）。サンプリング・**`chat_encode`**・進捗表示（**`Prefill complete` / `Decode complete` / `--- throughput ---`**）は **`gpu-cuda`** と同様。終了時 **`BENCH_LOG_FILE`**（既定 **`/tmp/benchmark.log`**）へ key=value ログ（プロンプト・生成全文含む）。**`generate()`** の tok/s は **重み H2D 後**の推論区間のみ。
 
+## 実行時の挙動（gpu-rocm-wmma）
+
+**`gpu-rocm-wmma`** は **`gpu-rocm`** とホスト・Decode・線形層が同一。**Prefill Attention** のみ差し替え。
+
+1. **Prefill Attention**: **`flash_attn_prefill_wmma_gqa_kernel`** — ヘッド × **16 行 query ブロック**（**`PREFILL_QB=WMMA_M=16`**）× **`FA_BR`** キータイル。各タイルで **Q/K を `__half` 転置バッファ**へ協調ロード → **`wmma_gemm_qk`**（rocWMMA **16×16×16**、f16 入力・f32 累積）→ online softmax → **F32 スカラー PV** 累積。**`blockDim=32`**（gfx1201 wave32）。
+2. **PV を WMMA 化しない理由**: **`scores`** が **`FA_BR` 未満の有効列**を含む場合、rocWMMA の col-major **B** 要件と整合しない（詳細は **`kernels.hip` 先頭コメント**）。
+3. **LDS**: q/k/v タイル + WMMA 転置バッファのため **`FA_BR=32` 推奨**（Makefile 既定）。**`FA_BR=64`** は LDS 上限に近づく。
+4. **性能特性**: WMMA QK^T の利得が **query 16 行ブロックによる grid 並列度低下**を上回らない短プロンプトでは、Prefill tok/s が **`gpu-rocm`** より低くなりうる。長プロンプトでは QK^T コスト比が増え WMMA 恩恵が相対的に大きくなる想定。
+
 ## コマンドラインオプション
 
 | オプション | 説明 | デフォルト（実装参照） |
@@ -444,7 +541,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 ## アーキテクチャ（`cpu/main.c` / `gpu-cuda/` / `gpu-rocm/`）
 
-**CPU 3 バリアント**は **1 ファイルの `main.c`** に実装を集約する（バリアント間でソースを `#include` しない）。**`gpu-cuda`** は **`main.c`（ホスト）** + **`kernels.cu`（デバイス）** + **`gpu.h`（API）** を基本とし、**`BONSAI_FP4=1`** 時は **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + **CUTLASS** を追加リンクする。**`gpu-rocm`** は **`main.c` + `kernels.hip` + `gpu.h`（`gpu_get_device_desc` 追加）** で **HIP** に置換した付録。**`cpu-omp/main.c`** はデータ構造・推論フェーズは **`cpu`** と同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生。**`gpu-cuda/main.c`** / **`gpu-rocm/main.c`** は **`cpu-blas`** から CPU forward を除き **`gpu_forward`** 呼び出しに置換した派生として読む。
+**CPU 3 バリアント**は **1 ファイルの `main.c`** に実装を集約する（バリアント間でソースを `#include` しない）。**`gpu-cuda`** は **`main.c`（ホスト）** + **`kernels.cu`（デバイス）** + **`gpu.h`（API）** を基本とし、**`BONSAI_FP4=1`** 時は **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + **CUTLASS** を追加リンクする。**`gpu-rocm`** は **`main.c` + `kernels.hip` + `gpu.h`（`gpu_get_device_desc` 追加）** で **HIP** に置換した付録。**`cpu-omp/main.c`** はデータ構造・推論フェーズは **`cpu`** と同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生。**`gpu-cuda/main.c`** / **`gpu-rocm/main.c`** / **`gpu-rocm-wmma/main.c`** は **`cpu-blas`** から CPU forward を除き **`gpu_forward`** 呼び出しに置換した派生として読む。**`gpu-rocm-wmma/kernels.hip`** は **`gpu-rocm/kernels.hip`** の Prefill Attention カーネルのみ rocWMMA 版に差し替え。
 
 ### レイヤー構成（概略）
 
@@ -476,6 +573,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 - **`gpu-cuda`（`make run.no-fp4`）**: **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**（単トークン + **`*_batch`** 版）。
 - **`gpu-cuda`（`make run` / `BONSAI_FP4=1`）**: 線形層は **NVFP4 E2M1（8 段階）+ UE4M3 ブロックスケール + CUTLASS GEMM**（**`fp4_bonsai_mm`**）。Attention は decode **`flash_attn_gqa_kernel`** / prefill **`flash_attn_prefill_gqa_kernel`**（K/V shared staging、**`FA_BR`** タイル、起動時 **`flash_attn_init_once`**）。
 - **`gpu-rocm`**: **Q8_0 活性化 + Q1_0 HIP カーネル**（単トークン + **`*_batch`** 版）。Attention は **`gpu-cuda` の FP4 無効経路と同型**（**`FA_BR`** 既定 **32**）。
+- **`gpu-rocm-wmma`**: 線形層・Decode は **`gpu-rocm`** 同一。**Prefill Attention QK^T** のみ **rocWMMA 16×16×16**（**PV** は F32 スカラー）。
 
 ### RoPE
 
@@ -500,23 +598,24 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 ## 制約・既知の制限
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（参考 decode **30.79 tok/s**）を推奨。
-- **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする（Makefile は **AVX2 不可なら `-mavx` または `-march=x86-64`**）。**`-ffast-math`** と **FMA 対応時の `-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。旧 **`-march=native`** 固定は廃止（クロスビルド・非 x86 ホストでは **`ARCH_FLAGS`** を明示指定）。
+- **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする（Makefile は **AVX2 不可なら `-mavx` または `-march=x86-64`**）。**`-ffast-math`** と **FMA 対応時の `-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。旧 **`-march=native`** 固定は廃止（クロスビルド・非 x86 ホストでは **`ARCH_FLAGS`** を明示指定）。**`make log.push`** は **`cpu-blas/Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-cuda`**（付録・NVIDIA）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考（2026-05-21）: **`make run`（NVFP4）** prefill **~1365 tok/s**、decode **~90.4 tok/s**；**`make run.no-fp4`** prefill **~293 tok/s**、decode **~47.0 tok/s**。**`make run.no-fp4`** 既定は PTX **`compute_86`**。**`make run`** は **CUDA 13**・**`sm_120a`**・**CUTLASS**・**`BONSAI_FP4=1`**（**`make blackwell`**、要 **sudo** のことがある）。Blackwell の静的 shared 上限 **48 KB** のため **`FA_BR=32`**（**`FA_BR=64`** はコンパイル不可）。**VRAM** に prefill バッチ（**`max_seq` 分**）と FP4 重みキャッシュを含む。**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
 - **`gpu-rocm`**（付録・AMD）: **ROCm**・**`hipcc`**・AMD GPU 実機が必要。本書「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」参照。**hipBLAS 不要**。**NVFP4 非対応**。**`GPU_ARCH`** は **`rocminfo`** 自動（未検出時は手動指定）。**`g++` / `libstdc++-dev`** 必須。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`** 制約は **`gpu-cuda`** と同趣旨。参考ベンチマーク: 上記 **GPU ROCm 表**（gfx1201・長プロンプト 130 + 生成 128）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
+- **`gpu-rocm-wmma`**（付録・AMD・実験）: **`gpu-rocm`** 要件に加え **rocWMMA**（ROCm 同梱ヘッダ）。Prefill Attention QK^T の WMMA 化のみ。**短プロンプトでは `gpu-rocm` より Prefill が遅い場合あり**（README 付録・本書 **GPU ROCm WMMA 表**）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。
 
 ## 補足：ドキュメント間の役割
 
-- **`README.md` / `README.en.md`**: **入口**。**本文**は CPU 3 バリアント。**付録**は **`gpu-cuda`** と **`gpu-rocm`**。ベンチマークの**正**は CPU 表を README 本文、GPU CUDA 表を README **`gpu-cuda` 付録**（本書に写し）。**`gpu-rocm`** ベンチマークは未収録（README 付録に明記）。
-- **`doc/design.md`（本書）**: **設計・仕様の静的説明**（CPU 3 バリアント + **`gpu-cuda`** / **`gpu-rocm`** 付録）。ベンチマークの**正**は CPU 表を README 本文、GPU CUDA 表を README **`gpu-cuda` 付録**と本書、**GPU ROCm 表**を本書（**`gpu-rocm/Makefile` の `BENCH_LOG`** に写し可）。
+- **`README.md` / `README.en.md`**: **入口**。**本文**は CPU 3 バリアント。**付録**は **`gpu-cuda`**・**`gpu-rocm`**・**`gpu-rocm-wmma`**。ベンチマークの**正**は CPU 短プロンプト表を README 本文、CPU 長プロンプト（**`cpu-blas`**）・GPU ROCm・GPU ROCm WMMA を README 付録と本書。
+- **`doc/design.md`（本書）**: **設計・仕様の静的説明**（CPU 3 バリアント + GPU 付録 3 種）。ベンチマークの**正**は上記 README と本書（各 Makefile の **`BENCH_LOG`** に写し可）。
 - **`doc/ChangeLog`**: 履歴。
 
-実装の**正**は **`bonsai-8b/cpu/main.c`**。**`cpu-omp`** / **`cpu-blas`** は CPU 派生。**`gpu-cuda`** / **`gpu-rocm`** は付録（CUDA は README 付録も参照）。**Prefill** **`gpu_forward_prefill`**、**Decode** **`gpu_forward`**。浮動小数の結合順などで数値差が出うる。
+実装の**正**は **`bonsai-8b/cpu/main.c`**。**`cpu-omp`** / **`cpu-blas`** は CPU 派生。**`gpu-cuda`** / **`gpu-rocm`** / **`gpu-rocm-wmma`** は付録（CUDA は README 付録も参照）。**Prefill** **`gpu_forward_prefill`**、**Decode** **`gpu_forward`**。浮動小数の結合順などで数値差が出うる。
 
 ## 補足：`design.md` 更新時のチェックリスト
 
-1. **`bonsai-8b/Makefile`** / **`cpu/Makefile`** / **`cpu-omp/Makefile`** / **`cpu-blas/Makefile`** / **`gpu-cuda/Makefile`** / **`gpu-rocm/Makefile`** と矛盾がないか。
-2. **`README.md` と `README.en.md`** の**本文（CPU）**および**付録（`gpu-cuda` / `gpu-rocm`）**と整合するか。
+1. **`bonsai-8b/Makefile`** / **`cpu/Makefile`** / **`cpu-omp/Makefile`** / **`cpu-blas/Makefile`** / **`gpu-cuda/Makefile`** / **`gpu-rocm/Makefile`** / **`gpu-rocm-wmma/Makefile`** と矛盾がないか。
+2. **`README.md` と `README.en.md`** の**本文（CPU）**および**付録（`gpu-cuda` / `gpu-rocm` / `gpu-rocm-wmma`）**と整合するか。
 3. 仕様変更は **`doc/ChangeLog`** に記録する。
