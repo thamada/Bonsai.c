@@ -806,7 +806,7 @@ make log               # 追記済み BENCH_LOG を表形式で表示
 
 **`bonsai-8b/gpu-rocm-wmma/` も付録**です。**`gpu-rocm`** の派生で、**Prefill Attention** の **QK^T** のみ **rocWMMA 16×16×16**（**`flash_attn_prefill_wmma_gqa_kernel`**）で加速します。**Decode**・線形層（Q1_0 GEMV）は **`gpu-rocm`** と同一です。**hipBLAS 不要**。**`make log` / `make log.push`** は **`gpu-rocm`** と同形式です。
 
-Prefill の **PV（scores × V）** は行列レイアウト都合で F32 スカラーのまま（WMMA 未採用）。短プロンプトでは query **16 行ブロック**による並列度低下のため、Prefill tok/s が **`gpu-rocm`** より低くなる場合があります。詳細は **`kernels.hip` 先頭コメント**および **`doc/design.md`** を参照してください。
+Prefill の **PV（scores × V）** は行列レイアウト都合で F32 スカラーのまま（WMMA 未採用）。Prefill / decode / total の優劣は **GPU 依存**（**gfx1201** では Prefill が **`gpu-rocm`** より低い例、**gfx1100** では total が上回る例あり）。詳細は **`kernels.hip` 先頭コメント**および **`doc/design.md`** を参照してください。
 
 ### ディレクトリ構成
 
@@ -838,13 +838,17 @@ make run
 
 | 項目 | 値 |
 |---|---|
-| GPU | **AMD gfx1201** |
+| GPU | **gfx1201** / **gfx1100** 等（**`GPU_ARCH`**。表の **GPU_ARCH** 列） |
 | ワークロード | 上記 **`gpu-rocm`** 表と同じ（130 + 128 トークン） |
 | 再現 | **`make log.push`** → **`make log`** |
 
-| 計測日時 | prefill tok/s | decode tok/s | total tok/s | 備考 |
-|---|---:|---:|---:|---|
-| 2026-05-27 21:00 | **170.18** | **42.04** | **67.74** | Prefill QK^T=rocWMMA。同一条件の **`gpu-rocm`** prefill **~175 tok/s** よりやや低い |
+| 計測日時 | GPU_ARCH | prefill tok/s | decode tok/s | total tok/s | 備考 |
+|---|---|---:|---:|---:|---|
+| 2026-05-27 21:00 | **gfx1201** | **170.18** | **42.04** | **67.74** | Prefill QK^T=rocWMMA。同一条件の **`gpu-rocm`** prefill **~175 tok/s** よりやや低い |
+| 2026-05-27 21:44 | **gfx1100** | **199.00** | **49.01** | **79.02** | 130+128 トークン（**gfx1201** ホストとは別 GPU・別ホスト） |
+| 2026-05-27 21:44 | **gfx1100** | **199.90** | **49.29** | **79.45** | 同上（2 回目） |
+
+**GPU_ARCH** 列は計測 GPU・ホストが異なるため、表内でも **`gpu-rocm`** 表と同様に条件を揃えて比較してください。**gfx1100** では decode / total が **`gpu-rocm`**（total **~76** tok/s）を上回る例があります。
 
 ### ソースを読む場合
 

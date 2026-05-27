@@ -37,7 +37,7 @@
 | `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一スコープ・GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は活性化を **Q8_0** 化して **`vec_dot_q1_0_q8_0`**（AVX2 時は ggml-cpu x86 準拠 SIMD、**`-mfma`**）。Attention はヘッドあたり **2 回の `cblas_sgemv`**。Norm 等 F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
 | `bonsai-8b/gpu-cuda/main.c` + **`kernels.cu`** | **NVIDIA GPU、CUDA（付録）** | 上記 CPU 3 バリアントと**同趣旨**だが **CUDA 依存**。README 付録参照。NVFP4（Blackwell）オプションあり。 |
 | `bonsai-8b/gpu-rocm/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP（付録）** | **`gpu-cuda`** と同 API・アルゴリズム（Q8_0 活性化 + Q1_0 GEMV、Flash Attention、prefill バッチ）。**hipBLAS 不要**。 |
-| `bonsai-8b/gpu-rocm-wmma/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP + rocWMMA（付録）** | **`gpu-rocm`** 派生。**Prefill** の **QK^T** のみ **rocWMMA 16×16×16**（**PV** は F32 スカラー）。**Decode**・線形層は **`gpu-rocm`** 同一。短プロンプトでは **`gpu-rocm`** より Prefill が遅い場合あり。 |
+| `bonsai-8b/gpu-rocm-wmma/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP + rocWMMA（付録）** | **`gpu-rocm`** 派生。**Prefill** の **QK^T** のみ **rocWMMA 16×16×16**（**PV** は F32 スカラー）。**Decode**・線形層は **`gpu-rocm`** 同一。Prefill / total の優劣は **GPU 依存**（**gfx1201** では Prefill が低い例、**gfx1100** では total が上回る例あり）。 |
 
 メタデータの照合は **GGUF 内の `qwen3.*` プレフィックス**（実装上のバイト列。`embedding_length` 等）と tokenizer 系キーで行う。実装コメントは「dense デコーダ」「Bonsai」と整合する。
 
@@ -138,14 +138,18 @@
 
 | 項目 | 値 |
 |------|-----|
-| GPU | **gfx1201**（**`GPU_ARCH`**） |
+| GPU | **gfx1201** / **gfx1100** 等（**`GPU_ARCH`**。表の **GPU_ARCH** 列） |
 | バイナリ | **`bonsai-gpu-rocm-wmma`** |
 | ワークロード | 上記 GPU ROCm 表と同じ（130 + 128 トークン） |
 | 再現 | `bonsai-8b/gpu-rocm-wmma/` で **`make log.push`** |
 
-| 計測日時 | prefill tok/s | decode tok/s | total tok/s | 備考 |
-|----------------|-------------:|-------------:|------------:|------|
-| 2026-05-27 21:00 | **170.18** | **42.04** | **67.74** | Prefill QK^T=rocWMMA。同一条件の **`gpu-rocm`**（prefill **~175 tok/s**）より Prefill はやや低い（WMMA 版は query 16 行ブロック・LDS 増で並列度が下がりうる。`kernels.hip` 先頭コメント参照） |
+| 計測日時 | GPU_ARCH | prefill tok/s | decode tok/s | total tok/s | 備考 |
+|----------------|----------|-------------:|-------------:|------------:|------|
+| 2026-05-27 21:00 | **gfx1201** | **170.18** | **42.04** | **67.74** | Prefill QK^T=rocWMMA。同一条件の **`gpu-rocm`**（prefill **~175 tok/s**）より Prefill はやや低い（query 16 行ブロック・LDS 増で並列度が下がりうる。`kernels.hip` 先頭コメント参照） |
+| 2026-05-27 21:44 | **gfx1100** | **199.00** | **49.01** | **79.02** | 130+128 トークン（**gfx1201** ホストとは別 GPU・別ホスト） |
+| 2026-05-27 21:44 | **gfx1100** | **199.90** | **49.29** | **79.45** | 同上（2 回目） |
+
+**GPU_ARCH** 列は計測 GPU・ホストが異なるため、表内でも **`gpu-rocm`** 表と同様に条件を揃えて比較する。**gfx1201** では Prefill が **`gpu-rocm`** より低い例があるが、**gfx1100** では decode / total が **`gpu-rocm`**（prefill **~206** / total **~76** tok/s）を上回る例もある（GPU・ワークロード依存）。
 
 ## ディレクトリとファイル構成
 
@@ -400,7 +404,7 @@ make run
 | Decode Attention | **`flash_attn_gqa_kernel`** | 同一 |
 | 線形層 | Q1_0×Q8_0 GEMV | 同一 |
 | 正確性 | — | WMMA QK + スカラー PV で **`gpu-rocm` と同等生成を確認** |
-| 性能 | — | 短プロンプトでは Prefill 並列度低下により **`gpu-rocm` より遅い場合あり** |
+| 性能 | — | **GPU 依存**（**gfx1201** では Prefill が低い例、**gfx1100** では total が上回る例 — 上記 **GPU ROCm WMMA 表**） |
 
 ## 実行時の挙動（CPU）
 
@@ -528,7 +532,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 1. **Prefill Attention**: **`flash_attn_prefill_wmma_gqa_kernel`** — ヘッド × **16 行 query ブロック**（**`PREFILL_QB=WMMA_M=16`**）× **`FA_BR`** キータイル。各タイルで **Q/K を `__half` 転置バッファ**へ協調ロード → **`wmma_gemm_qk`**（rocWMMA **16×16×16**、f16 入力・f32 累積）→ online softmax → **F32 スカラー PV** 累積。**`blockDim=32`**（gfx1201 wave32）。
 2. **PV を WMMA 化しない理由**: **`scores`** が **`FA_BR` 未満の有効列**を含む場合、rocWMMA の col-major **B** 要件と整合しない（詳細は **`kernels.hip` 先頭コメント**）。
 3. **LDS**: q/k/v タイル + WMMA 転置バッファのため **`FA_BR=32` 推奨**（Makefile 既定）。**`FA_BR=64`** は LDS 上限に近づく。
-4. **性能特性**: WMMA QK^T の利得が **query 16 行ブロックによる grid 並列度低下**を上回らない短プロンプトでは、Prefill tok/s が **`gpu-rocm`** より低くなりうる。長プロンプトでは QK^T コスト比が増え WMMA 恩恵が相対的に大きくなる想定。
+4. **性能特性**: WMMA QK^T の利得と **query 16 行ブロックによる grid 並列度低下**のバランスは **GPU 依存**。**gfx1201** 実測（上記 WMMA 表）では Prefill tok/s が **`gpu-rocm`** より低い例がある。**gfx1100** では decode / total が **`gpu-rocm`** を上回る例もある。短プロンプトでは Prefill 並列度低下の影響が相対的に大きい。
 
 ## コマンドラインオプション
 
@@ -606,7 +610,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする（Makefile は **AVX2 不可なら `-mavx` または `-march=x86-64`**）。**`-ffast-math`** と **FMA 対応時の `-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。長プロンプト **`make log.push`** では **`avx2+fma`** と **`avx`** で total tok/s が大きく異なりうる（上記 CPU 長プロンプト表）。旧 **`-march=native`** 固定は廃止（クロスビルド・非 x86 ホストでは **`ARCH_FLAGS`** を明示指定）。**`make log.push`** は **`cpu-blas/Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-cuda`**（付録・NVIDIA）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考（2026-05-21）: **`make run`（NVFP4）** prefill **~1365 tok/s**、decode **~90.4 tok/s**；**`make run.no-fp4`** prefill **~293 tok/s**、decode **~47.0 tok/s**。**`make run.no-fp4`** 既定は PTX **`compute_86`**。**`make run`** は **CUDA 13**・**`sm_120a`**・**CUTLASS**・**`BONSAI_FP4=1`**（**`make blackwell`**、要 **sudo** のことがある）。Blackwell の静的 shared 上限 **48 KB** のため **`FA_BR=32`**（**`FA_BR=64`** はコンパイル不可）。**VRAM** に prefill バッチ（**`max_seq` 分**）と FP4 重みキャッシュを含む。**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
 - **`gpu-rocm`**（付録・AMD）: **ROCm**・**`hipcc`**・AMD GPU 実機が必要。本書「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」参照。**hipBLAS 不要**。**NVFP4 非対応**。**`GPU_ARCH`** は **`rocminfo`** 自動（未検出時は手動指定）。**`g++` / `libstdc++-dev`** 必須。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`** 制約は **`gpu-cuda`** と同趣旨。参考ベンチマーク: 上記 **GPU ROCm 表**（**gfx1201** / **gfx1100** 等・長プロンプト 130 + 生成 128。**GPU_ARCH** ごとにホストが異なる場合あり）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
-- **`gpu-rocm-wmma`**（付録・AMD・実験）: **`gpu-rocm`** 要件に加え **rocWMMA**（ROCm 同梱ヘッダ）。Prefill Attention QK^T の WMMA 化のみ。**短プロンプトでは `gpu-rocm` より Prefill が遅い場合あり**（README 付録・本書 **GPU ROCm WMMA 表**）。
+- **`gpu-rocm-wmma`**（付録・AMD・実験）: **`gpu-rocm`** 要件に加え **rocWMMA**（ROCm 同梱ヘッダ）。Prefill Attention QK^T の WMMA 化のみ。**Prefill / decode / total の優劣は GPU 依存**（**gfx1201** では Prefill が **`gpu-rocm`** より低い例、**gfx1100** では total が上回る例 — 本書 **GPU ROCm WMMA 表**）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。

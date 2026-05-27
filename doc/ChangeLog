@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-27 21:44:56
+
+**`bonsai-8b/gpu-rocm-wmma/Makefile`**: **`make log.push`** 実測 2 件を **`BENCH_LOG`** に追記（**`GPU_ARCH=gfx1100`**、130+128 トークン: prefill **199.00** / **199.90**、decode **49.01** / **49.29**、total **79.02** / **79.45** tok/s）。
+
+**`README.md` / `README.en.md`**: GPU ROCm WMMA 付録の参考ベンチマーク表に **GPU_ARCH** 列と **gfx1100** 行 2 件を追加。性能は GPU 依存である旨を追記。
+
+**`doc/design.md`**: **GPU ROCm WMMA** 参考ベンチマーク表に **GPU_ARCH** 列と **gfx1100** 行 2 件を追加。性能特性・制約節を GPU 依存の記述に更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-27 21:40:42
 
 **`bonsai-8b/gpu-rocm/Makefile`**: **`make log.push`** 実測 1 件を **`BENCH_LOG`** に追記（**`GPU_ARCH=gfx1100`**、130+128 トークン: prefill **206.40** / decode **46.22** / total **75.90** tok/s）。
