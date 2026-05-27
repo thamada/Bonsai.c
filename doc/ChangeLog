@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-27 17:51:10
+
+**`bonsai-8b/Makefile`**: ターゲットを **`model` のみ**に整理（**`.DEFAULT_GOAL := model`**）。**`build.*`** / **`run.*`** / **`blackwell`** / **`clean`** / **`all`** を削除。ビルド・実行は各サブディレクトリ Makefile を直接使用。**`model`**: **`$(MODEL)` が既にある**場合は再ダウンロードせず **`sha256sum --check`** のみ。未存在時のみ **`gguf.txt`** から **`wget`** 後に検証。
+
+**`README.md` / `README.en.md`**: ルート Makefile（**`model` のみ**）・既存 GGUF 時の checksum のみ・サブディレクトリでのビルド／実行／**`clean`** 手順に追随。
+
+**`doc/design.md`**: ルート Makefile の役割（**`model` のみ**）・サブディレクトリ Makefile へのビルド手順・モデル取得（既存時は checksum のみ）を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-27 17:30:18
 
 **`bonsai-8b/gpu-rocm/Makefile`**: **`log`** / **`log.push`** ターゲットを追加。**`BENCH_PROMPT`**（長文・ChatML 後 ~130 トークン）、**`BENCH_N=128`**、**`BENCH_SEED`**、**`BENCH_LOG_FILE`**（既定 **`/tmp/benchmark.log`**）。**`log.push`** は推論実行後にログを解析し **`BENCH_LOG += ISO8601|GPU_ARCH|hostname|…`** を **`Makefile` に追記**（推論のみの tok/s、重み H2D 除外）。gfx1201 実測 2 件を記録。
