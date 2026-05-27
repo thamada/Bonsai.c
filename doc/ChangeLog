@@ -4,6 +4,26 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-27 21:13:00
+
+**`README.md` / `README.en.md`**: ディレクトリツリーに **`gpu-rocm-wmma`** を追加。**`cpu-blas`** の **`log`/`log.push`**・長プロンプトベンチ表を本文に追加。**`gpu-rocm`** ベンチ 3 件目を追記。**付録「AMD ROCm / HIP + rocWMMA（`gpu-rocm-wmma`）」** を新設。片付け・スコープ表記を追随。
+
+**`doc/design.md`**: README 付録に **`gpu-rocm-wmma`** 収録済みに更新（ドキュメント間役割・制約・チェックリスト）。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-27 21:10:57
+
+**`bonsai-8b/gpu-rocm-wmma/`**（新規）: **`gpu-rocm`** の Prefill Attention **QK^T** を **rocWMMA 16×16×16** で加速した派生版。**`main.c`**（ホスト）、**`kernels.hip`**（**`flash_attn_prefill_wmma_gqa_kernel`** + **`gpu-rocm` 共通カーネル**）、**`gpu.h`**（**`gpu-rocm` と同一**）、**`Makefile`**（**`bonsai-gpu-rocm-wmma`**、**`hipcc`**、**`FA_BR` 既定 32**、**`log` / `log.push`**）。**Decode**・線形層は **`gpu-rocm`** 同一。**PV** は F32 スカラー（WMMA 未採用、`kernels.hip` 先頭にレイアウト問題の開発知見）。gfx1201 実測 1 件（130+128 トークン: prefill **170.18** / decode **42.04** / total **67.74** tok/s）。
+
+**`bonsai-8b/cpu-blas/Makefile`**: **`log`** / **`log.push`** ターゲットを追加（**`gpu-rocm`** と同趣旨の長プロンプトベンチ。**`BENCH_LOG`** 第 2 列は **`BENCH_SIMD`** = **`ARCH_FLAGS`** 短縮ラベル）。gfx1201 計測ホストで AVX 実測 1 件（130+128: prefill/decode/total **~1.98 tok/s**）。
+
+**`bonsai-8b/cpu-blas/main.c`**: 終了時 **`write_benchmark_log`**（**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**）。
+
+**`doc/design.md`**: **`gpu-rocm-wmma`** 付録（概要・バリアント表・ディレクトリ／Make 表・ビルド手順・実行挙動・量子化・制約）、**`cpu-blas`** の **`log`/`log.push`**・CPU 長プロンプトベンチ表、GPU ROCm WMMA ベンチ表を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-27 19:15:32
 
 **`bonsai-8b/gpu-rocm/main.c`**: **`-Wall -Wextra`** 下で警告ゼロに整理。未使用だった **CPU デ量子化**（**Q4_K / Q5_K / IQ2_S / IQ3_S** 復号、**IQ グリッド表**、**`host_f16f32`** 等）を削除 — **`gpu-rocm`** は重みを mmap から **`gpu_model_create`** で **VRAM へ H2D** するのみで、ホスト側 dequant は不要。**`-p` 既定**は **`const char *`**。**`BenchLogInfo`** は **`memset` ゼロ初期化**後にフィールド代入。

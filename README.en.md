@@ -63,10 +63,11 @@ An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for sm
     │   ├── Makefile
     │   └── main.c
     ├── gpu-cuda/          # appendix (end of this README)
-    └── gpu-rocm/          # appendix (end of this README)
+    ├── gpu-rocm/          # appendix (end of this README)
+    └── gpu-rocm-wmma/     # appendix (Prefill WMMA experiment)
 ```
 
-The reference decoder lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the CPU optimized build is **`bonsai-8b/cpu-blas/`**. GPU builds are optional appendices **`gpu-cuda`** (NVIDIA) and **`gpu-rocm`** (AMD)—see the sections at the end of this file.
+The reference decoder lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the CPU optimized build is **`bonsai-8b/cpu-blas/`**. GPU builds are optional appendices **`gpu-cuda`** (NVIDIA), **`gpu-rocm`** (AMD), and **`gpu-rocm-wmma`** (AMD, Prefill Attention WMMA experiment)—see the sections at the end of this file.
 
 ## Beginners: what happens during LLM inference?
 
@@ -238,6 +239,25 @@ cd bonsai-8b/cpu-blas
 make run PROMPT="Hello"
 ```
 
+### Benchmark logging (`make log` / `make log.push`)
+
+Run a long-prompt benchmark (~**130** tokens after ChatML + **128** decode tokens) and append results to **`cpu-blas/Makefile`** (same idea as **`gpu-rocm`** `log.push`). Column 2 is **`BENCH_SIMD`** (short label for **`ARCH_FLAGS`**, e.g. **`avx2+fma`**).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BENCH_PROMPT` | Long English text (in Makefile) | Benchmark prompt |
+| `BENCH_N` | `128` | Max new tokens (`-n`) |
+| `BENCH_SEED` | `42` | RNG seed (`-s`) |
+| `BENCH_LOG_FILE` | `/tmp/benchmark.log` | key=value log path |
+
+```bash
+cd bonsai-8b/cpu-blas
+make log.push          # build → benchmark → append one line to Makefile
+make log               # print BENCH_LOG as a table
+```
+
+**Note:** **`make log.push` modifies `cpu-blas/Makefile`**. Check **`git diff`** before committing.
+
 ## Reference benchmark
 
 **Reference numbers from development machines**—your results will vary with CPU, memory, compiler flags, and model placement. Re-run with the same GGUF and command to compare.
@@ -260,6 +280,20 @@ make run PROMPT="Hello"
 | `cpu-blas/bonsai-cpu-blas` | 0.5 s | **30.79 tok/s** | `-O3 -fopenmp -ffast-math`, `ARCH_FLAGS` from cpuinfo (5950X: `-mavx2 -mfma`), OpenBLAS at 1 thread |
 
 Under these conditions, **`cpu-blas` was about 6× faster than `cpu-omp`** and **about 128× faster than `cpu`** (`cpu-omp` was about 21× faster than `cpu`). Generated text (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`) matched on all three CPU binaries.
+
+### Long prompt (`cpu-blas` **`make log.push`**)
+
+| Item | Value |
+|---|---|
+| CPU | AVX (**`BENCH_SIMD=avx`**, auto-detected from cpuinfo on the benchmark host) |
+| Workload | **130** tokens after ChatML + **128** decode tokens (**`-n 128 -t 0 -s 42`**) |
+| Reproduce | In **`bonsai-8b/cpu-blas/`**: **`make log.push`** |
+
+| Timestamp | SIMD | Prefill tok/s | Decode tok/s | Total tok/s |
+|---|---|---:|---:|---:|
+| 2026-05-27 19:39 | **avx** | **1.96** | **1.99** | **1.98** |
+
+Do **not** compare this table directly to the short-prompt table above (5950X, `-p "Hello" -n 16`).
 
 ## Common CLI options
 
@@ -309,6 +343,7 @@ cd bonsai-8b/cpu-blas && make clean
 # Appendix GPU builds:
 cd bonsai-8b/gpu-cuda && make clean
 cd bonsai-8b/gpu-rocm && make clean
+cd bonsai-8b/gpu-rocm-wmma && make clean
 ```
 
 ## Troubleshooting
@@ -353,7 +388,7 @@ Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-
 ## Out of scope
 
 - Training / fine-tuning  
-- **AMD NPU (e.g. XDNA2)**, **Vulkan, Metal**, and similar (**`gpu-cuda`** / **`gpu-rocm`** are optional appendix builds; the main focus is the three CPU variants)  
+- **AMD NPU (e.g. XDNA2)**, **Vulkan, Metal**, and similar (**`gpu-cuda`**, **`gpu-rocm`**, **`gpu-rocm-wmma`** are optional appendix builds; the main focus is the three CPU variants)  
 - Batch inference tuning (GPU appendix prefill batching is for faster decode, not server batching)  
 - Image input  
 - Server or Web API packaging  
@@ -632,7 +667,7 @@ With the same prompt and `-t 0`, **both configurations** matched **`cpu-blas`** 
 
 **CUDA / `nvcc` not found:** Install CUDA Toolkit and an NVIDIA driver, then rebuild in **`gpu-cuda`**. Older CUDA may not support `-arch=native`; the default builds PTX (`compute_86`) for driver JIT. Set **`CUDA_GENCODE`** for your GPU (see **`gpu-cuda/Makefile`**). If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
-**Clean:** run **`make clean`** in **`bonsai-8b/gpu-cuda`** or **`bonsai-8b/gpu-rocm`**.
+**Clean:** run **`make clean`** in **`bonsai-8b/gpu-cuda`**, **`bonsai-8b/gpu-rocm`**, or **`bonsai-8b/gpu-rocm-wmma`**.
 
 ### Source files to read
 
@@ -747,6 +782,7 @@ make log               # print BENCH_LOG entries as a table
 |---|---:|---:|---:|---|
 | 2026-05-27 17:21 | **175.03** | **41.89** | **67.92** | gfx1201, 130+128 tokens |
 | 2026-05-27 17:29 | **174.18** | **42.06** | **68.08** | Same setup (2nd run) |
+| 2026-05-27 19:15 | **174.76** | **41.95** | **67.98** | Same setup (3rd run) |
 
 Do **not** compare these numbers directly to the **CPU table** (`-p "Hello" -n 16`) or the **CUDA appendix** (prefill 18 + decode 16)—prompt length and token counts differ. For short prompts, run `./bonsai-gpu-rocm ... -p "Hello" -n 16 -t 0` manually and read stderr **`--- throughput ---`**.
 
@@ -759,3 +795,54 @@ Do **not** compare these numbers directly to the **CPU table** (`-p "Hello" -n 1
 10. `bonsai-8b/gpu-rocm/main.c` — host side (`generate`, **`write_benchmark_log`**)  
 11. `bonsai-8b/gpu-rocm/kernels.hip` — HIP kernels, VRAM, **`gpu_get_device_desc`**  
 12. `bonsai-8b/gpu-rocm/gpu.h` — C API (**`gpu_get_device_desc`** added)  
+
+---
+
+## AMD ROCm / HIP + rocWMMA (`gpu-rocm-wmma`)
+
+**`bonsai-8b/gpu-rocm-wmma/` is also an appendix.** It derives from **`gpu-rocm`** and accelerates **Prefill Attention QK^T** only with **rocWMMA 16×16×16** (**`flash_attn_prefill_wmma_gqa_kernel`**). **Decode** and linear layers (Q1_0 GEMV) match **`gpu-rocm`**. **hipBLAS is not required.** **`make log` / `make log.push`** use the same format as **`gpu-rocm`**.
+
+**PV (scores × V)** in prefill stays on an F32 scalar path (WMMA not used—matrix layout constraints). On short prompts, prefill tok/s can be **lower than `gpu-rocm`** because of 16-row query blocking. See the header comment in **`kernels.hip`** and **`doc/design.md`**.
+
+### Directory layout
+
+```text
+bonsai-8b/gpu-rocm-wmma/
+├── Makefile
+├── main.c
+├── kernels.hip    # Prefill WMMA + shared gpu-rocm kernels
+└── gpu.h          # same as gpu-rocm
+```
+
+### Build and run
+
+| Goal | Command (`bonsai-8b/gpu-rocm-wmma/`) |
+|---|---|
+| Build and run (default) | `make` / `make run` |
+| Show benchmark history | `make log` |
+| Run benchmark and append history | `make log.push` |
+
+Same requirements as **`gpu-rocm`** (ROCm, **`hipcc`**, **`GPU_ARCH`**, **`g++` / `libstdc++-dev`**). Default **`FA_BR=32`** (WMMA transpose buffers increase LDS use).
+
+```bash
+cd bonsai-8b/gpu-rocm-wmma
+make run
+./bonsai-gpu-rocm-wmma ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+### Reference benchmark (GPU ROCm WMMA)
+
+| Item | Value |
+|---|---|
+| GPU | **AMD gfx1201** |
+| Workload | Same as the **`gpu-rocm`** table above (130 + 128 tokens) |
+| Reproduce | **`make log.push`** then **`make log`** |
+
+| Timestamp | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
+|---|---:|---:|---:|---|
+| 2026-05-27 21:00 | **170.18** | **42.04** | **67.74** | Prefill QK^T via rocWMMA; prefill slightly below **`gpu-rocm`** (~175 tok/s) at same workload |
+
+### Source files to read
+
+13. `bonsai-8b/gpu-rocm-wmma/kernels.hip` — **`flash_attn_prefill_wmma_gqa_kernel`** and WMMA notes  
+14. `bonsai-8b/gpu-rocm-wmma/main.c` — host side (same shape as **`gpu-rocm`**)  
