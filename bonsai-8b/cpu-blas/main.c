@@ -2106,7 +2106,76 @@ static void decode_progress_done(int n_tokens, double elapsed_sec) {
             n_tokens, elapsed_sec, tps);
 }
 
-static void throughput_summary(int n_prefill, double prefill_sec,
+#define BENCH_LOG_DEFAULT "/tmp/benchmark.log"
+
+typedef struct {
+    const char *model_path;
+    const char *prompt_text;
+    const char *platform_desc;
+    int   max_new;
+    float temp;
+    float topp;
+    uint64_t seed;
+    int   max_seq;
+    int   n_prefill;
+    int   n_decode;
+    double prefill_sec;
+    double decode_sec;
+    double total_sec;
+    double prefill_tps;
+    double decode_tps;
+    double total_tps;
+} BenchLogInfo;
+
+static void write_benchmark_log(const BenchLogInfo *info) {
+    const char *path = getenv("BENCH_LOG_FILE");
+    if (!path || !path[0]) path = BENCH_LOG_DEFAULT;
+
+    time_t now = time(NULL);
+    struct tm tm_local;
+    localtime_r(&now, &tm_local);
+    char timestamp[32];
+    strftime(timestamp, sizeof timestamp, "%Y-%m-%dT%H:%M:%S", &tm_local);
+
+    char hostname[256];
+    hostname[0] = '\0';
+    if (gethostname(hostname, sizeof hostname) != 0)
+        snprintf(hostname, sizeof hostname, "unknown");
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "warning: could not write benchmark log: %s\n", path);
+        return;
+    }
+
+    fprintf(f, "# bonsai-cpu-blas benchmark log\n");
+    fprintf(f, "timestamp=%s\n", timestamp);
+    fprintf(f, "hostname=%s\n", hostname);
+    fprintf(f, "model=%s\n", info->model_path ? info->model_path : "");
+    fprintf(f, "max_new=%d\n", info->max_new);
+    fprintf(f, "temperature=%.6g\n", (double)info->temp);
+    fprintf(f, "top_p=%.6g\n", (double)info->topp);
+    fprintf(f, "seed=%llu\n", (unsigned long long)info->seed);
+    fprintf(f, "max_seq=%d\n", info->max_seq);
+    fprintf(f, "platform=%s\n", info->platform_desc ? info->platform_desc : "");
+    fprintf(f, "\n");
+    fprintf(f, "prompt_tokens=%d\n", info->n_prefill);
+    fprintf(f, "gen_tokens=%d\n", info->n_decode);
+    fprintf(f, "prefill_sec=%.4f\n", info->prefill_sec);
+    fprintf(f, "decode_sec=%.4f\n", info->decode_sec);
+    fprintf(f, "total_sec=%.4f\n", info->total_sec);
+    fprintf(f, "prefill_tps=%.2f\n", info->prefill_tps);
+    fprintf(f, "decode_tps=%.2f\n", info->decode_tps);
+    fprintf(f, "total_tps=%.2f\n", info->total_tps);
+    fprintf(f, "\n");
+    fprintf(f, "--- prompt ---\n");
+    fprintf(f, "%s\n", info->prompt_text ? info->prompt_text : "");
+    fprintf(f, "--- end prompt ---\n");
+    fclose(f);
+}
+
+static void throughput_summary(const BenchLogInfo *meta,
+                             int n_prefill, double prefill_sec,
                              int n_decode, double decode_sec,
                              double total_sec) {
     double prefill_tps = (prefill_sec > 0.0) ? (double)n_prefill / prefill_sec : 0.0;
@@ -2117,10 +2186,24 @@ static void throughput_summary(int n_prefill, double prefill_sec,
     fprintf(stderr, "  prefill: %.2f tok/s\n", prefill_tps);
     fprintf(stderr, "  decode:  %.2f tok/s\n", decode_tps);
     fprintf(stderr, "  total:   %.2f tok/s\n", total_tps);
+
+    if (meta) {
+        BenchLogInfo info = *meta;
+        info.n_prefill = n_prefill;
+        info.n_decode = n_decode;
+        info.prefill_sec = prefill_sec;
+        info.decode_sec = decode_sec;
+        info.total_sec = total_sec;
+        info.prefill_tps = prefill_tps;
+        info.decode_tps = decode_tps;
+        info.total_tps = total_tps;
+        write_benchmark_log(&info);
+    }
 }
 
 static void generate(Model *m, int *prompt, int n_prompt,
-                     int max_new, float temp, float topp, uint64_t seed) {
+                     int max_new, float temp, float topp, uint64_t seed,
+                     const BenchLogInfo *meta) {
     uint64_t rng = seed ? seed : 1;
     int token = prompt[0];
     int gen = 0;
@@ -2184,7 +2267,7 @@ static void generate(Model *m, int *prompt, int n_prompt,
     printf("\n\n--- %d prompt tokens + %d generated tokens ---\n", n_prompt, gen);
     printf("--- %.1fs total ---\n", elapsed);
     if (prefill_reported || decode_timing)
-        throughput_summary(n_prompt, prefill_sec, gen, decode_sec, elapsed);
+        throughput_summary(meta, n_prompt, prefill_sec, gen, decode_sec, elapsed);
 }
 
 int main(int argc, char *argv[]) {
@@ -2273,7 +2356,31 @@ int main(int argc, char *argv[]) {
     int *prompt_tokens = chat_encode(&model.tok, prompt, &n_prompt_tokens);
     printf("Prompt: \"%s\" (%d tokens)\n\n", prompt, n_prompt_tokens);
 
-    generate(&model, prompt_tokens, n_prompt_tokens, max_tokens, temp, topp, seed);
+    char platform_desc[64];
+#if defined(__AVX2__)
+    snprintf(platform_desc, sizeof platform_desc, "avx2");
+#elif defined(__AVX__)
+    snprintf(platform_desc, sizeof platform_desc, "avx");
+#else
+    snprintf(platform_desc, sizeof platform_desc, "x86-64");
+#endif
+#if defined(__FMA__)
+    strncat(platform_desc, "+fma", sizeof platform_desc - strlen(platform_desc) - 1);
+#endif
+
+    BenchLogInfo bench_meta;
+    memset(&bench_meta, 0, sizeof bench_meta);
+    bench_meta.model_path = model_path;
+    bench_meta.prompt_text = prompt;
+    bench_meta.platform_desc = platform_desc;
+    bench_meta.max_new = max_tokens;
+    bench_meta.temp = temp;
+    bench_meta.topp = topp;
+    bench_meta.seed = seed;
+    bench_meta.max_seq = max_seq;
+
+    generate(&model, prompt_tokens, n_prompt_tokens, max_tokens, temp, topp, seed,
+             &bench_meta);
 
     free(prompt_tokens);
     free_state(&model.s);
