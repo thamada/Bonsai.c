@@ -8,12 +8,12 @@
 
 [Announcing 1-bit Bonsai: The First Commercially Viable 1-bit LLMs](https://prismml.com/news/bonsai-8b)（PrismML, 2026）では、**1-bit Bonsai 8B** が埋め込み・アテンション・MLP・言語モデルヘッドに至るまで **ネットワーク全体を 1-bit で設計**し、高位精度への「逃げ道」を置かない **真の 1-bit モデル**（約 82 億パラメータ）であることが説明されています。公開ウェイトは **Apache License 2.0** です。エッジからクラウドまで **知性の密度（intelligence density）** と実用的なスループット・省エネを両立させる、というビジョンと、モデルサイズの小ささ（記事では **約 1.15 GB**）が強調されています。
 
-**本リポジトリが読み込む GGUF** は **`Bonsai-8B-Q1_0.gguf`**（Q1_0 量子化）です。**テキストのプロンプト入出力**に限定し、画像入力は扱いません。
+**本リポジトリが読み込む GGUF** は **`Bonsai-8B-Q1_0.gguf`**（Q1_0 量子化）です。**CPU 3 バリアント**（`cpu` / `cpu-omp` / `cpu-blas`）はこのファイル**専用** — 線形重みは **Q1_0**、norm は **F32** のみ対応し、他量子化形式の GGUF はエラー終了します。**テキストのプロンプト入出力**に限定し、画像入力は扱いません。
 
 **PyTorch・TensorFlow・JAX・ONNX Runtime など、機械学習向けのユーザランドライブラリ／ランタイムは一切リンクしていません。**  
 推論の基準となる実装は **標準Cと `libm`** のみで、`bonsai-8b/cpu/main.c` から **CPU 単スレッド**の実行ファイル（`bonsai-cpu`）をビルドします。  
 より速い検証向けに、同じ GGUF に対応した **OpenMP マルチスレッド**版を `bonsai-8b/cpu-omp/main.c` から **`bonsai-cpu-omp`** として別ビルドできます（ランタイムは **標準C + `libm` + OpenMP ランタイム**）。  
-さらに **`bonsai-8b/cpu-blas/`** では **OpenMP + OpenBLAS** と **Q1_0 専用の融合内積カーネル**で **`bonsai-cpu-blas`** をビルドできます（**標準C + `libm` + OpenMP + OpenBLAS**）。
+さらに **`bonsai-8b/cpu-blas/`** では **OpenMP + OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠）で **`bonsai-cpu-blas`** をビルドできます（**標準C + `libm` + OpenMP + OpenBLAS**）。
 
 ### なぜライブラリ非依存なのか
 
@@ -149,6 +149,8 @@ make build
 
 ## CPU 単スレッド版
 
+**`Bonsai-8B-Q1_0.gguf` 専用**。線形重みは **Q1_0** の融合行内積（**`dot_q1_0_row`**）、Embedding は **`dequant_q1_0_blocks`**。norm 重みは **F32**。
+
 ### ビルド
 
 ```bash
@@ -181,7 +183,7 @@ make run MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
 
 ## CPU OpenMP 版（`cpu-omp`）
 
-`cpu/main.c` と同じモデル・CLI を前提にし、行列積・アテンション・SwiGLU などを **OpenMP** で並列化したビルドです。
+`cpu/main.c` と同じモデル・CLI・**Q1_0 専用**スコープを前提に、行列積・アテンション・SwiGLU などを **OpenMP** で並列化したビルドです。
 
 ### ビルド
 
@@ -215,7 +217,7 @@ make run PROMPT="日本語で短く自己紹介してください。"
 
 ## CPU OpenMP + OpenBLAS 版（`cpu-blas`、推奨）
 
-`cpu-omp` と同じモデル・CLI を前提に、**Q1_0 専用の融合内積**（中間 FP32 展開なし）と **OpenBLAS**（Attention の `sgemv` 集約、F32 行の `sgemv`）で高速化したビルドです。OpenBLAS は **1 スレッド固定**とし、並列度は **OpenMP** に任せます（ネスト並列の衝突を避けるため）。
+`cpu-omp` と同じモデル・CLI・**Q1_0 専用**スコープを前提に、活性化を **Q8_0** 化して **`vec_dot_q1_0_q8_0`**（AVX2 時 SIMD、llama.cpp 準拠）と **OpenBLAS**（Attention の `sgemv` 集約、F32 norm 行の `sgemv`）で高速化したビルドです。OpenBLAS は **1 スレッド固定**とし、並列度は **OpenMP** に任せます（ネスト並列の衝突を避けるため）。
 
 ### ビルド
 
@@ -285,13 +287,16 @@ make log               # 追記済み BENCH_LOG を表形式で表示
 
 | 項目 | 値 |
 |---|---|
-| CPU | AVX（**`BENCH_SIMD=avx`**。計測ホストの cpuinfo 自動検出） |
 | ワークロード | ChatML 後 **130** トークン + decode **128** トークン（**`-n 128 -t 0 -s 42`**） |
-| 再現 | `bonsai-8b/cpu-blas/` で **`make log.push`** |
+| 表の指標 | **`/tmp/benchmark.log`**（または **`BENCH_LOG_FILE`**）の **`prefill_tps` / `decode_tps` / `total_tps`** — 推論区間のみ |
+| 再現 | `bonsai-8b/cpu-blas/` で **`make log.push`** → **`make log`** |
+| SIMD 列 | 計測ホストの **`ARCH_FLAGS`** 短縮ラベル（**`BENCH_SIMD`**）。**`avx`** と **`avx2+fma`** は**別ホスト**のため表内でも条件を揃えて比較 |
 
 | 計測日時 | SIMD | prefill tok/s | decode tok/s | total tok/s |
 |---|---|---:|---:|---:|
 | 2026-05-27 19:39 | **avx** | **1.96** | **1.99** | **1.98** |
+| 2026-05-27 19:57 | **avx** | **1.97** | **2.00** | **1.99** |
+| 2026-05-27 21:31 | **avx2+fma** | **26.34** | **25.85** | **26.09** |
 
 上記短プロンプト表（5950X・`-p "Hello" -n 16`）とは**直接比較しない**でください。
 
@@ -383,7 +388,7 @@ cd bonsai-8b && make model
 2. `doc/design.md`  
 3. `bonsai-8b/cpu/main.c` — 単スレッドの基準実装  
 4. `bonsai-8b/cpu-omp/main.c` — OpenMP 並列版  
-5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + Q1_0 融合カーネル  
+5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + Q1_0×Q8_0 SIMD 内積  
 
 ## このリポジトリで扱わないもの
 
@@ -392,7 +397,7 @@ cd bonsai-8b && make model
 - バッチ推論の最適化（GPU 付録の prefill バッチは decode 高速化用）  
 - 画像入力  
 - サーバ化・Web API 化  
-- すべての GGUF 量子化形式への汎用対応  
+- **`Bonsai-8B-Q1_0.gguf` 以外**の GGUF（CPU 3 バリアントは **Q1_0 線形重み + F32 norm** のみ。旧来の Q4_K / IQ 等汎用パスは削除済み）  
 - 公式実装との完全な数値一致保証  
 
 目的は、**Bonsai-8B-Q1_0**（GGUF）のテキスト推論を **C** で理解し、実験し、必要に応じて改造できるようにすることです。
