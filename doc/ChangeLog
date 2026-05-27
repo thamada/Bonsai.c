@@ -4,6 +4,18 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-27 19:15:32
+
+**`bonsai-8b/gpu-rocm/main.c`**: **`-Wall -Wextra`** 下で警告ゼロに整理。未使用だった **CPU デ量子化**（**Q4_K / Q5_K / IQ2_S / IQ3_S** 復号、**IQ グリッド表**、**`host_f16f32`** 等）を削除 — **`gpu-rocm`** は重みを mmap から **`gpu_model_create`** で **VRAM へ H2D** するのみで、ホスト側 dequant は不要。**`-p` 既定**は **`const char *`**。**`BenchLogInfo`** は **`memset` ゼロ初期化**後にフィールド代入。
+
+**`bonsai-8b/gpu-rocm/kernels.hip`**: Flash Attention / RMSNorm の shared 還元で **`unsigned int s`**、**`hd` / `tc`** 比較は **`(int)threadIdx.x`** にキャスト（符号不一致警告解消）。クリーンアップの **`hipFree`** は **`(void)hipFree(...)`**（**`nodiscard`** 警告解消）。
+
+**`bonsai-8b/gpu-rocm/Makefile`**: **`log.push`** 実測 1 件を **`BENCH_LOG`** に追記（gfx1201、130+128 トークン）。
+
+**`doc/design.md`**: **`gpu-rocm`** のホスト役割（CPU dequant なし）・ビルド警告方針・GPU ROCm ベンチ表を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-27 17:51:10
 
 **`bonsai-8b/Makefile`**: ターゲットを **`model` のみ**に整理（**`.DEFAULT_GOAL := model`**）。**`build.*`** / **`run.*`** / **`blackwell`** / **`clean`** / **`all`** を削除。ビルド・実行は各サブディレクトリ Makefile を直接使用。**`model`**: **`$(MODEL)` が既にある**場合は再ダウンロードせず **`sha256sum --check`** のみ。未存在時のみ **`gguf.txt`** から **`wget`** 後に検証。

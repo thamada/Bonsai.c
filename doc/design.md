@@ -107,6 +107,7 @@
 |----------------|-------------:|-------------:|------------:|------|
 | 2026-05-27 17:21 | **175.03** | **41.89** | **67.92** | gfx1201、130+128 トークン |
 | 2026-05-27 17:29 | **174.18** | **42.06** | **68.08** | 同上（2 回目） |
+| 2026-05-27 19:15 | **174.76** | **41.95** | **67.98** | 同上（3 回目） |
 
 短プロンプト（`-p "Hello" -n 16 -t 0`）の CPU/CUDA 表とは**直接比較しない**（トークン数・prefill 長が異なる）。短いプロンプトの参考計測は手動実行と stderr の throughput 行で行う。
 
@@ -129,10 +130,10 @@
 | `bonsai-8b/gpu-cuda/gpu.h` | **`GpuModel`** / **`gpu_model_create`** / **`gpu_forward`** / **`gpu_forward_prefill`** / **`gpu_copy_logits`** 等の C API（**`extern "C"`**）。 |
 | `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成。**`.DEFAULT_GOAL := run`**（Blackwell + NVFP4）。**`run.no-fp4`**: PTX **`compute_86`**。**`blackwell`**: apt **CUDA 11** 削除 → **`cuda-toolkit-13`** → **`BLACKWELL_GENCODE=arch=compute_120a,code=sm_120a`** + **`BONSAI_FP4=1`** + **`FA_BR=32`**（要 **sudo**）。**`nvcc` の実体ディレクトリを `PATH` 先頭に追加**（`nvlink` 未検出対策）。 |
 | `bonsai-8b/gpu-cuda/third_party/cutlass/` | **`make cutlass`** で取得（FP4 ビルド時）。 |
-| `bonsai-8b/gpu-rocm/main.c` | **`cpu-blas` / `gpu-cuda` と同趣旨のホスト側**（GGUF・トークナイザ・サンプリング）。終了時 **`write_benchmark_log`**（**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**）。**`generate()`** 内の prefill/decode 計測は **重み H2D 後**のみ。 |
-| `bonsai-8b/gpu-rocm/kernels.hip` | **HIP カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`**、**`gpu_get_device_desc`**）。 |
+| `bonsai-8b/gpu-rocm/main.c` | **`cpu-blas` / `gpu-cuda` と同趣旨のホスト側**（GGUF mmap・メタデータ・トークナイザ・サンプリング・進捗表示）。**CPU デ量子化コードは持たない**（Q1_0 重みは **`kernels.hip`** 側で mmap → **H2D**）。終了時 **`write_benchmark_log`**（**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**）。**`generate()`** 内の prefill/decode 計測は **重み H2D 後**のみ。 |
+| `bonsai-8b/gpu-rocm/kernels.hip` | **HIP カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`**、**`gpu_get_device_desc`**）。**`GpuBlockQ1_0` / `GpuBlockQ8_0`** は **`gpu.h`** 定義。 |
 | `bonsai-8b/gpu-rocm/gpu.h` | **`gpu-cuda/gpu.h` をベースに `gpu_get_device_desc` を追加**（`GpuModel`・`gpu_forward*` 等は同一）。 |
-| `bonsai-8b/gpu-rocm/Makefile` | **`bonsai-gpu-rocm`** の生成（上記ビルドフラグ）。**`log`**（**`BENCH_LOG`** 履歴を表形式表示）、**`log.push`**（**`BENCH_PROMPT`**・**`BENCH_N`**・**`BENCH_SEED`** でベンチ実行→ログ解析→**`Makefile` に `BENCH_LOG +=` 追記**）。**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**。 |
+| `bonsai-8b/gpu-rocm/Makefile` | **`bonsai-gpu-rocm`** の生成（**`-Wall -Wextra -Wno-unused-parameter`**、**`hipcc -x hip`**）。**`log`**（**`BENCH_LOG`** 履歴を表形式表示）、**`log.push`**（**`BENCH_PROMPT`**・**`BENCH_N`**・**`BENCH_SEED`** でベンチ実行→ログ解析→**`Makefile` に `BENCH_LOG +=` 追記**）。**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL（`blob/main` 形式）。 |
 | `bonsai-8b/Bonsai-8B-Q1_0.gguf.sha256sum` | 既定 GGUF の SHA256 チェックサム（`make model` の検証に使用）。 |
 | `doc/design.md` | 本書。 |
@@ -297,7 +298,7 @@ make run
 ./bonsai-gpu-rocm ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 8
 ```
 
-**要件**: **ROCm**（**`ROCM=/opt/rocm`** 既定、**`$(ROCM)/bin/hipcc`**・**`rocminfo`**）、AMD GPU ドライバ、**`libamdhip64`**。**hipBLAS・PyTorch 等は不要**。ホスト側は **`g++`** と **`libstdc++-dev`**（**`hipcc`** が GCC の C++ ヘッダ／`libstdc++` を参照するため。未検出時はビルド失敗）。**`GPU_ARCH`** 未検出時は **`make GPU_ARCH=gfx1100 build`** 等で明示（**`GPU_ARCH` 空のまま `make` はエラー**）。
+**要件**: **ROCm**（**`ROCM=/opt/rocm`** 既定、**`$(ROCM)/bin/hipcc`**・**`rocminfo`**）、AMD GPU ドライバ、**`libamdhip64`**。**hipBLAS・PyTorch 等は不要**。ホスト側は **`g++`** と **`libstdc++-dev`**（**`hipcc`** が GCC の C++ ヘッダ／`libstdc++` を参照するため。未検出時はビルド失敗）。**`GPU_ARCH`** 未検出時は **`make GPU_ARCH=gfx1100 build`** 等で明示（**`GPU_ARCH` 空のまま `make` はエラー**）。**`make build`** は **`-Wall -Wextra`** で警告なし（2026-05-27 時点）。
 
 **`FA_BR`**: Makefile 既定 **32**（**`-DFA_BR=32`**）。shared 余裕のある GPU では **`make FA_BR=64 build`** 可（**`kernels.hip`** ソース既定は 64、ビルド時マクロが優先）。
 
@@ -423,7 +424,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 **`gpu-rocm`** は **`gpu-cuda` の `make run.no-fp4` 経路**と実質同型（**NVFP4 なし**、線形層は **Q8_0 量子化 + Q1_0 GEMV** のみ）。
 
-1. **起動時**: **`gpu_print_device_info()`**（**`hipGetDeviceProperties`**）で GPU 名・compute 版・VRAM を表示。**`gpu_model_create`** 内で **`flash_attn_init_once()`** が decode/prefill カーネルに **`hipFuncAttributePreferredSharedMemoryCarveout=100`** を設定。GGUF を mmap したうえで重み・KV・活性を **`hipMalloc`** / **`hipMemcpy(H2D)`** で VRAM 常駐。prefill 用 **`x_batch` 等**（**`batch_cap = max_seq`**）も事前確保（**`gpu-cuda`** の VRAM 表と同構成）。
+1. **起動時**: **`gpu_print_device_info()`**（**`hipGetDeviceProperties`**）で GPU 名・compute 版・VRAM を表示。**`gpu_model_create`** 内で **`flash_attn_init_once()`** が decode/prefill カーネルに **`hipFuncAttributePreferredSharedMemoryCarveout=100`** を設定。GGUF を mmap したうえで **Q1_0 重み blob をそのまま** **`hipMalloc`** / **`hipMemcpy(H2D)`** で VRAM 常駐（**`main.c` に CPU dequant 経路はない**）。KV・活性・prefill 用 **`x_batch` 等**（**`batch_cap = max_seq`**）も事前確保（**`gpu-cuda`** の VRAM 表と同構成）。
 2. **Prefill / Decode**: **`gpu_forward_prefill`** → **`gpu_forward`**（**`gpu-cuda`** 節のカーネル対応表と同趣旨。API は **`hip`**）。
 3. **線形層**: **`quantize_q8_0_*` + `mm_q1_0_*`** HIP カーネルのみ（FP4 分岐なし）。
 4. **Attention**: **`FA_BR`** タイル（Makefile 既定 **32**）、K/V shared staging、online softmax、GQA。
@@ -447,7 +448,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 ### レイヤー構成（概略）
 
-1. **GGUF / GGML dtype**: 必要な tensor dtype（**Q1_0** 等）とブロック構造を定義。
+1. **GGUF / GGML dtype**: 必要な tensor dtype（**Q1_0** 等）とブロック構造を定義。**`gpu-rocm/main.c`** はメタデータ用 enum のみ（**CPU dequant ブロック型・IQ グリッド表は持たない**）。量子化レイアウトの実体は **`gpu.h`** の **`GpuBlockQ1_0`** / **`GpuBlockQ8_0`** と **`kernels.hip`**。
 2. **モデル構造体**: `Config`、`TensorInfo`、トークナイザ、重み参照、`State`（KV・中間バッファ）。
 3. **ロード**: mmap、metadata（`qwen3.*`）、tensor テーブル、tokenizer。
 4. **推論**: CPU 3 バリアントは 1 トークンずつ forward（prefill も teacher forcing で逐次）。**`gpu-cuda`** / **`gpu-rocm`** は prefill を **`gpu_forward_prefill`** でバッチ、decode を **`gpu_forward`** で逐次。生成区間はサンプリング。
