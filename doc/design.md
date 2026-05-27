@@ -14,7 +14,7 @@
 
 **`bonsai-8b/gpu-cuda/`**（**`main.c`** + **`kernels.cu`** + **`gpu.h`**、任意で **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + CUTLASS → **`bonsai-gpu-cuda`**）は **CUDA Runtime のみ（`libcudart`）** の **付録実装**（NVIDIA）。README 上は **プロジェクト目的（単一 C・依存最小）の外**と明記し、**将来別リポジトリへ移す予定**。技術メモ・ビルド手順・GPU ベンチマークは README 末尾の **「NVIDIA CUDA 実装（`gpu-cuda`）について」** 付録に、仕様の静的説明は本書に記載。**Prefill** は **`gpu_forward_prefill`**（バッチ並列）、**Decode** は **`gpu_forward`**（1 トークンずつ）。Blackwell 向け **`make run`**（**`BONSAI_FP4=1`**）では線形層のみ **NVFP4 + CUTLASS**（本書「NVFP4 + CUTLASS」）。
 
-**`bonsai-8b/gpu-rocm/`**（**`main.c`** + **`kernels.hip`** + **`gpu.h`** → **`bonsai-gpu-rocm`**）は **ROCm HIP のみ（`libamdhip64`）** の **付録実装**（AMD）。**`gpu-cuda`** と同一の **`gpu.h` C API**・GGUF・CLI・**`chat_encode`**・RoPE・prefill/decode 分割。**hipBLAS 不要**（線形層は Q1_0×Q8_0 カスタム HIP カーネル）。**NVFP4 経路なし**。ビルドは **`hipcc`**、**`GPU_ARCH`** は **`rocminfo`** から **`gfx*`** を自動検出（上書き可）。README 本文は CPU 中心のまま；利用手順の詳細は本書。
+**`bonsai-8b/gpu-rocm/`**（**`main.c`** + **`kernels.hip`** + **`gpu.h`** → **`bonsai-gpu-rocm`**）は **ROCm HIP のみ（`libamdhip64`）** の **付録実装**（AMD）。**`gpu-cuda`** とほぼ同一の **`gpu.h` C API**（追加 **`gpu_get_device_desc`**）・GGUF・CLI・**`chat_encode`**・RoPE・prefill/decode 分割。**`make log` / `make log.push`** でベンチ履歴を **`Makefile` に記録**。**hipBLAS 不要**。**NVFP4 経路なし**。ビルドは **`hipcc`**、**`GPU_ARCH`** は **`rocminfo`** から **`gfx*`** を自動検出（上書き可）。
 
 目的は、推論経路（GGUF 読み取り・量子化復元・Transformer forward・サンプリング）を **C の明示的なコードパス**として追い、改変しやすくすることである。学習・商用 SLA・公式実装との数値一致はスコープ外。
 
@@ -40,7 +40,7 @@
 
 ### 参考ベンチマーク（開発環境）
 
-環境依存の参考値。CPU・GPU・メモリ・ビルドフラグ・GGUF が RAM/VRAM に載っているかで大きく変わる。**CPU 表**の手順全文は **`README.md`** / **`README.en.md`** 本文の「参考ベンチマーク」。**GPU CUDA 表**は本書で管理し、数値の写しは README 付録 **「NVIDIA CUDA 実装（`gpu-cuda`）について」** にも載せる。**`gpu-rocm`** は本書にベンチマーク未収録（下記）。
+環境依存の参考値。CPU・GPU・メモリ・ビルドフラグ・GGUF が RAM/VRAM に載っているかで大きく変わる。**CPU 表**の手順全文は **`README.md`** / **`README.en.md`** 本文の「参考ベンチマーク」。**GPU CUDA 表**は本書で管理し、数値の写しは README 付録 **「NVIDIA CUDA 実装（`gpu-cuda`）について」** にも載せる。**GPU ROCm 表**は本書（**`make log.push`**、長プロンプトワークロード。下記）。
 
 #### CPU（2026-05-19 計測）
 
@@ -91,9 +91,24 @@
 
 同一プロンプト・`-t 0` で **いずれの構成も `cpu-blas` と同じ生成テキスト**（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）。FP4 有効時は decode が **約 1.9 倍**、prefill が **約 4.7 倍**（いずれも tok/s）程度（無効構成は decode で **`cpu-blas`（5950X 参考 30.79 tok/s）の約 1.5 倍**程度）。
 
-#### GPU ROCm（ベンチマーク未収録）
+#### GPU ROCm（2026-05-27 計測、`make log.push`）
 
-**`gpu-rocm`** は **`gpu-cuda` の `make run.no-fp4`** と同系（Q1_0 + Q8_0、Flash Attention、prefill バッチ）。本リポジトリでは **参考 tok/s 表は未計測**（環境・ROCm 版・`GPU_ARCH` で変動）。計測時は CPU/GPU CUDA 表と同じコマンド（`-p "Hello" -n 16 -t 0`）と stderr の **`Prefill complete` / `Decode complete`** 行を用いる。
+| 項目 | 値 |
+|------|-----|
+| GPU | **gfx1201**（ROCm。**`rocminfo` → `GPU_ARCH`**） |
+| OS | Linux（計測ホスト名例: コンテナ ID） |
+| モデル | `Bonsai-8B-Q1_0.gguf` |
+| ワークロード | 長文プロンプト（ChatML 後 **130** トークン）+ decode **128** トークン（**`-n 128 -t 0 -s 42`**。`gpu-rocm/Makefile` の **`BENCH_PROMPT`** / **`BENCH_N`** 既定） |
+| 表の指標（prefill / decode） | stderr の **`Prefill complete` / `Decode complete`** 行（**`generate()` 内**の prefill/decode 区間のみ） |
+| 表の指標（total） | **`/tmp/benchmark.log`**（または **`BENCH_LOG_FILE`**）の **`total_tps`** — **prefill+decode の推論区間**（**重みの H2D（`gpu_model_create`）は含めない**） |
+| 再現 | `bonsai-8b/gpu-rocm/` で **`make log.push`**（実行後 **`make log`** で履歴表示。結果は **`Makefile` 内の `BENCH_LOG +=` 行**に追記） |
+
+| 計測日時（抜粋） | prefill tok/s | decode tok/s | total tok/s | 備考 |
+|----------------|-------------:|-------------:|------------:|------|
+| 2026-05-27 17:21 | **175.03** | **41.89** | **67.92** | gfx1201、130+128 トークン |
+| 2026-05-27 17:29 | **174.18** | **42.06** | **68.08** | 同上（2 回目） |
+
+短プロンプト（`-p "Hello" -n 16 -t 0`）の CPU/CUDA 表とは**直接比較しない**（トークン数・prefill 長が異なる）。短いプロンプトの参考計測は手動実行と stderr の throughput 行で行う。
 
 ## ディレクトリとファイル構成
 
@@ -114,10 +129,10 @@
 | `bonsai-8b/gpu-cuda/gpu.h` | **`GpuModel`** / **`gpu_model_create`** / **`gpu_forward`** / **`gpu_forward_prefill`** / **`gpu_copy_logits`** 等の C API（**`extern "C"`**）。 |
 | `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成。**`.DEFAULT_GOAL := run`**（Blackwell + NVFP4）。**`run.no-fp4`**: PTX **`compute_86`**。**`blackwell`**: apt **CUDA 11** 削除 → **`cuda-toolkit-13`** → **`BLACKWELL_GENCODE=arch=compute_120a,code=sm_120a`** + **`BONSAI_FP4=1`** + **`FA_BR=32`**（要 **sudo**）。**`nvcc` の実体ディレクトリを `PATH` 先頭に追加**（`nvlink` 未検出対策）。 |
 | `bonsai-8b/gpu-cuda/third_party/cutlass/` | **`make cutlass`** で取得（FP4 ビルド時）。 |
-| `bonsai-8b/gpu-rocm/main.c` | **`cpu-blas` / `gpu-cuda` と同趣旨のホスト側**（GGUF・トークナイザ・サンプリング）。**`gpu.h`** 経由で **`kernels.hip`** を呼ぶ。 |
-| `bonsai-8b/gpu-rocm/kernels.hip` | **HIP カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`**）。 |
-| `bonsai-8b/gpu-rocm/gpu.h` | **`gpu-cuda/gpu.h` と同一 API**（`GpuModel`・`gpu_forward*` 等）。 |
-| `bonsai-8b/gpu-rocm/Makefile` | **`bonsai-gpu-rocm`** の生成。**`ROCM ?= /opt/rocm`**、**`HIPCC`**・**`ROCMININFO`**。**`.DEFAULT_GOAL := run`**。**`main.o`**（**`main.c`** を **`hipcc -x hip -c`**）+ **`kernels.o`**（**`kernels.hip`**）をリンク。**`--offload-arch=$(GPU_ARCH)`**（**`rocminfo`** の最初の **`gfx*`**、**`detect-gpu-arch`**）。**`-std=c++17 -O3`**、**`-lamdhip64`**（**`-rpath $(ROCM)/lib`**）。**`FA_BR`** 既定 **32**（gfx11/gfx12 向け。**`-DFA_BR`**）。**`g++` / `libstdc++-dev`** の include・**`libstdc++`** を **`hipcc`** に渡す。 |
+| `bonsai-8b/gpu-rocm/main.c` | **`cpu-blas` / `gpu-cuda` と同趣旨のホスト側**（GGUF・トークナイザ・サンプリング）。終了時 **`write_benchmark_log`**（**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**）。**`generate()`** 内の prefill/decode 計測は **重み H2D 後**のみ。 |
+| `bonsai-8b/gpu-rocm/kernels.hip` | **HIP カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`**、**`gpu_get_device_desc`**）。 |
+| `bonsai-8b/gpu-rocm/gpu.h` | **`gpu-cuda/gpu.h` をベースに `gpu_get_device_desc` を追加**（`GpuModel`・`gpu_forward*` 等は同一）。 |
+| `bonsai-8b/gpu-rocm/Makefile` | **`bonsai-gpu-rocm`** の生成（上記ビルドフラグ）。**`log`**（**`BENCH_LOG`** 履歴を表形式表示）、**`log.push`**（**`BENCH_PROMPT`**・**`BENCH_N`**・**`BENCH_SEED`** でベンチ実行→ログ解析→**`Makefile` に `BENCH_LOG +=` 追記**）。**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**。 |
 | `bonsai-8b/gguf.txt` | 既定 GGUF の Hugging Face URL（`blob/main` 形式）。 |
 | `bonsai-8b/Bonsai-8B-Q1_0.gguf.sha256sum` | 既定 GGUF の SHA256 チェックサム（`make model` の検証に使用）。 |
 | `doc/design.md` | 本書。 |
@@ -142,7 +157,7 @@
 | `bonsai-8b/cpu-omp/Makefile` | `build` / `run` / `clean` | `cpu-omp/bonsai-cpu-omp` | `cpu-omp/main.c` |
 | `bonsai-8b/cpu-blas/Makefile` | `build` / `run` / `clean` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
 | `bonsai-8b/gpu-cuda/Makefile` | **`run`**（既定）/ **`run.no-fp4`** / `build` / `clean` / **`blackwell`** | `gpu-cuda/bonsai-gpu-cuda` | `main.c` + `kernels.cu`（FP4 時 + `fp4_*.cu`） |
-| `bonsai-8b/gpu-rocm/Makefile` | **`run`**（既定）/ `build` / `clean` / **`detect-gpu-arch`** | `gpu-rocm/bonsai-gpu-rocm` | `main.c` + `kernels.hip`（**`hipcc -x hip`**） |
+| `bonsai-8b/gpu-rocm/Makefile` | **`run`**（既定）/ `build` / `clean` / **`detect-gpu-arch`** / **`log`** / **`log.push`** | `gpu-rocm/bonsai-gpu-rocm` | `main.c` + `kernels.hip`（**`hipcc -x hip`**） |
 
 **`bonsai-8b/Makefile`** 用変数:
 
@@ -273,6 +288,8 @@ make run.no-fp4
 | ビルド＋実行（既定） | **`make`** / **`make run`** |
 | ビルドのみ | **`make build`** |
 | GPU ISA 確認 | **`make detect-gpu-arch`** |
+| ベンチマーク履歴表示 | **`make log`** |
+| ベンチ実行＋履歴追記 | **`make log.push`**（上書き: **`BENCH_N=64`** 等） |
 
 ```bash
 cd bonsai-8b/gpu-rocm
@@ -285,6 +302,15 @@ make run
 **`FA_BR`**: Makefile 既定 **32**（**`-DFA_BR=32`**）。shared 余裕のある GPU では **`make FA_BR=64 build`** 可（**`kernels.hip`** ソース既定は 64、ビルド時マクロが優先）。
 
 ルートから: **`make build.gpu-rocm`** / **`make run.gpu-rocm`**（**`MODEL`** / **`PROMPT`** 変数はルート Makefile 共通）。
+
+**ベンチマークログ（`log.push`）**:
+
+1. **`bonsai-gpu-rocm`** を **`BENCH_PROMPT`**（既定は約 128 トークン相当の英文）・**`-n BENCH_N`**（既定 **128**）・**`-t 0`**・**`-s BENCH_SEED`** で実行。
+2. 終了時 **`write_benchmark_log`** が **`BENCH_LOG_FILE`**（既定 **`/tmp/benchmark.log`**）に key=value 形式で書き出す（**`prompt_tokens`**, **`gen_tokens`**, **`prefill_tps`**, **`decode_tps`**, **`total_tps`**, プロンプト全文・生成全文など）。
+3. **`log.push`** がログを読み、**`ISO8601|GPU_ARCH|hostname|prompt|gen|prefill|decode|total`** の 1 行を **`gpu-rocm/Makefile`** の **`# BENCH_LOG_END`** 直前に **`sed -i`** で追記。
+4. **`make log`** で **`BENCH_LOG`** 行を表表示。
+
+**`BENCH_LOG` の `total_tps`** は **`generate()` 開始〜終了**の wall time に対する **`(n_prefill + n_decode) / total_sec`** であり、**`gpu_model_create` 以前の重みアップロード時間は含まない**（Makefile コメントと同旨）。
 
 ## 実行時の挙動（CPU）
 
@@ -404,7 +430,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 3. **線形層**: **`quantize_q8_0_*` + `mm_q1_0_*`** HIP カーネルのみ（FP4 分岐なし）。
 4. **Attention**: **`FA_BR`** タイル（Makefile 既定 **32**）、K/V shared staging、online softmax、GQA。
 
-**`gpu.h`** は **`gpu-cuda/gpu.h` と同一**（`extern "C"` API）。サンプリング・**`chat_encode`**・進捗表示は **`main.c`** 側で **`gpu-cuda`** と同様。
+**`gpu.h`** は **`gpu-cuda` をベースに `gpu_get_device_desc` を追加**（`extern "C"` API）。サンプリング・**`chat_encode`**・進捗表示（**`Prefill complete` / `Decode complete` / `--- throughput ---`**）は **`gpu-cuda`** と同様。終了時 **`BENCH_LOG_FILE`**（既定 **`/tmp/benchmark.log`**）へ key=value ログ（プロンプト・生成全文含む）。**`generate()`** の tok/s は **重み H2D 後**の推論区間のみ。
 
 ## コマンドラインオプション
 
@@ -419,7 +445,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 ## アーキテクチャ（`cpu/main.c` / `gpu-cuda/` / `gpu-rocm/`）
 
-**CPU 3 バリアント**は **1 ファイルの `main.c`** に実装を集約する（バリアント間でソースを `#include` しない）。**`gpu-cuda`** は **`main.c`（ホスト）** + **`kernels.cu`（デバイス）** + **`gpu.h`（API）** を基本とし、**`BONSAI_FP4=1`** 時は **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + **CUTLASS** を追加リンクする。**`gpu-rocm`** は **`main.c` + `kernels.hip` + `gpu.h`（同一 API）** で **HIP** に置換した付録。**`cpu-omp/main.c`** はデータ構造・推論フェーズは **`cpu`** と同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生。**`gpu-cuda/main.c`** / **`gpu-rocm/main.c`** は **`cpu-blas`** から CPU forward を除き **`gpu_forward`** 呼び出しに置換した派生として読む。
+**CPU 3 バリアント**は **1 ファイルの `main.c`** に実装を集約する（バリアント間でソースを `#include` しない）。**`gpu-cuda`** は **`main.c`（ホスト）** + **`kernels.cu`（デバイス）** + **`gpu.h`（API）** を基本とし、**`BONSAI_FP4=1`** 時は **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + **CUTLASS** を追加リンクする。**`gpu-rocm`** は **`main.c` + `kernels.hip` + `gpu.h`（`gpu_get_device_desc` 追加）** で **HIP** に置換した付録。**`cpu-omp/main.c`** はデータ構造・推論フェーズは **`cpu`** と同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生。**`gpu-cuda/main.c`** / **`gpu-rocm/main.c`** は **`cpu-blas`** から CPU forward を除き **`gpu_forward`** 呼び出しに置換した派生として読む。
 
 ### レイヤー構成（概略）
 
@@ -477,7 +503,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（参考 decode **30.79 tok/s**）を推奨。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする（Makefile は **AVX2 不可なら `-mavx` または `-march=x86-64`**）。**`-ffast-math`** と **FMA 対応時の `-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。旧 **`-march=native`** 固定は廃止（クロスビルド・非 x86 ホストでは **`ARCH_FLAGS`** を明示指定）。
 - **`gpu-cuda`**（付録・NVIDIA）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考（2026-05-21）: **`make run`（NVFP4）** prefill **~1365 tok/s**、decode **~90.4 tok/s**；**`make run.no-fp4`** prefill **~293 tok/s**、decode **~47.0 tok/s**。**`make run.no-fp4`** 既定は PTX **`compute_86`**。**`make run`** は **CUDA 13**・**`sm_120a`**・**CUTLASS**・**`BONSAI_FP4=1`**（**`make blackwell`**、要 **sudo** のことがある）。Blackwell の静的 shared 上限 **48 KB** のため **`FA_BR=32`**（**`FA_BR=64`** はコンパイル不可）。**VRAM** に prefill バッチ（**`max_seq` 分**）と FP4 重みキャッシュを含む。**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
-- **`gpu-rocm`**（付録・AMD）: **ROCm**・**`hipcc`**・AMD GPU 実機が必要。本書「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」参照。**hipBLAS 不要**。**NVFP4 非対応**。**`GPU_ARCH`** は **`rocminfo`** 自動（未検出時は手動指定）。**`g++` / `libstdc++-dev`** 必須。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`** 制約は **`gpu-cuda`** と同趣旨。参考ベンチマークは**未収録**。
+- **`gpu-rocm`**（付録・AMD）: **ROCm**・**`hipcc`**・AMD GPU 実機が必要。本書「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」参照。**hipBLAS 不要**。**NVFP4 非対応**。**`GPU_ARCH`** は **`rocminfo`** 自動（未検出時は手動指定）。**`g++` / `libstdc++-dev`** 必須。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`** 制約は **`gpu-cuda`** と同趣旨。参考ベンチマーク: 上記 **GPU ROCm 表**（gfx1201・長プロンプト 130 + 生成 128）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。
 - **コンテキスト長**を大きくすると KV 用メモリが増える。
 - 商用水平の性能・公式実装との一致は保証しない。
@@ -485,7 +511,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 ## 補足：ドキュメント間の役割
 
 - **`README.md` / `README.en.md`**: **入口**。**本文**は CPU 3 バリアント。**付録**は **`gpu-cuda`** と **`gpu-rocm`**。ベンチマークの**正**は CPU 表を README 本文、GPU CUDA 表を README **`gpu-cuda` 付録**（本書に写し）。**`gpu-rocm`** ベンチマークは未収録（README 付録に明記）。
-- **`doc/design.md`（本書）**: **設計・仕様の静的説明**（CPU 3 バリアント + **`gpu-cuda`** / **`gpu-rocm`** 付録）。ベンチマークの**正**は CPU 表を README 本文、GPU CUDA 表を README **`gpu-cuda` 付録**と本書。**`gpu-rocm`** ベンチマークは未収録。
+- **`doc/design.md`（本書）**: **設計・仕様の静的説明**（CPU 3 バリアント + **`gpu-cuda`** / **`gpu-rocm`** 付録）。ベンチマークの**正**は CPU 表を README 本文、GPU CUDA 表を README **`gpu-cuda` 付録**と本書、**GPU ROCm 表**を本書（**`gpu-rocm/Makefile` の `BENCH_LOG`** に写し可）。
 - **`doc/ChangeLog`**: 履歴。
 
 実装の**正**は **`bonsai-8b/cpu/main.c`**。**`cpu-omp`** / **`cpu-blas`** は CPU 派生。**`gpu-cuda`** / **`gpu-rocm`** は付録（CUDA は README 付録も参照）。**Prefill** **`gpu_forward_prefill`**、**Decode** **`gpu_forward`**。浮動小数の結合順などで数値差が出うる。

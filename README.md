@@ -643,7 +643,7 @@ PTX **`compute_86`** + ドライバ JIT、Q1_0 GEMV（FP4 パスなし）。`gpu
 
 ## AMD ROCm / HIP 実装（`gpu-rocm`）について
 
-**`bonsai-8b/gpu-rocm/` も本リポジトリの目的（単一 C ソース・依存最小）から外れた付録**です。`main.c` + `kernels.hip` + `gpu.h`（**`gpu-cuda/gpu.h` と同一 C API**）に分かれ、**ROCm（`hipcc`）・AMD GPU ドライバ・実機**が必要です。**hipBLAS 不要**（線形層は Q1_0×Q8_0 のカスタム HIP カーネル）。**NVFP4 経路はありません**（アルゴリズムは **`gpu-cuda` の `make run.no-fp4`** と同系）。
+**`bonsai-8b/gpu-rocm/` も本リポジトリの目的（単一 C ソース・依存最小）から外れた付録**です。`main.c` + `kernels.hip` + `gpu.h`（**`gpu-cuda/gpu.h` をベースに `gpu_get_device_desc` を追加した C API**）に分かれ、**ROCm（`hipcc`）・AMD GPU ドライバ・実機**が必要です。**hipBLAS 不要**（線形層は Q1_0×Q8_0 のカスタム HIP カーネル）。**NVFP4 経路はありません**（アルゴリズムは **`gpu-cuda` の `make run.no-fp4`** と同系）。**`make log` / `make log.push`** でベンチマーク履歴を **`gpu-rocm/Makefile` に記録**できます。
 
 筆者が **AMD GPU 上でも同じ forward を試す**ための実験用コードです。初めて読む方は無視して構いません。詳細仕様は **`doc/design.md`** の「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」を参照してください。
 
@@ -654,12 +654,14 @@ bonsai-8b/gpu-rocm/
 ├── Makefile
 ├── main.c
 ├── kernels.hip
-└── gpu.h          # gpu-cuda/gpu.h と同一 API
+└── gpu.h          # gpu-cuda をベース（gpu_get_device_desc 追加）
 ```
 
 ### 技術的な概要
 
 `cpu-blas` / **`gpu-cuda`（FP4 なし）** と同じ GGUF・CLI・**prefill バッチ + decode 逐次**（**`gpu_forward_prefill`** / **`gpu_forward`**）。ホストは GGUF mmap・トークナイザ・サンプリング、デバイスは **Flash Attention**（K/V shared staging、**`FA_BR`** タイル）と **Q8_0 活性化 + Q1_0 GEMV**。VRAM 配置の考え方は上記 CUDA 付録の表と同趣旨（API は **HIP** / **`hipMalloc`**）。
+
+終了時に **`BENCH_LOG_FILE`**（既定 **`/tmp/benchmark.log`**）へ key=value 形式のベンチマークログを書きます。stderr の prefill/decode/total tok/s は **`generate()` 内**（**`gpu_model_create` による重み H2D の後**）のみを計測します。
 
 ### 必要なもの
 
@@ -676,6 +678,8 @@ PyTorch・hipBLAS 等は不要です。
 | ビルド＋実行（既定） | `make` / `make run` |
 | ビルドのみ | `make build` |
 | GPU ISA 確認 | `make detect-gpu-arch` |
+| ベンチ履歴の表示 | `make log` |
+| ベンチ実行＋履歴追記 | `make log.push`（例: `make log.push BENCH_N=64`） |
 
 **`GPU_ARCH`**（例: `gfx1100`）は **`rocminfo`** から自動検出されます。未検出時は `make GPU_ARCH=gfx1100 build` のように明示してください。ビルド成功時に **Detected GPU arch** が表示されます。
 
@@ -702,16 +706,54 @@ make run.gpu-rocm PROMPT="Hello"
 
 CLI オプション（`-p`、`-n`、`-t`、`-k`、`-s`、`-l`）は CPU 版と同様です。
 
+### ベンチマーク記録（`make log` / `make log.push`）
+
+| 変数 | 既定 | 意味 |
+|---|---|---|
+| `BENCH_PROMPT` | 長文英文（Makefile 内） | ChatML 化後 **約 130 トークン**のプロンプト |
+| `BENCH_N` | `128` | 最大生成トークン数（`-n`） |
+| `BENCH_SEED` | `42` | 乱数シード（`-s`） |
+| `BENCH_LOG_FILE` | `/tmp/benchmark.log` | 実行後に書き出す key=value ログ |
+
+```bash
+cd bonsai-8b/gpu-rocm
+make log.push          # ビルド → ベンチ実行 → ログ解析 → Makefile に 1 行追記
+make log               # 追記済み BENCH_LOG を表形式で表示
+```
+
+**`log.push` の流れ:**
+
+1. **`BENCH_PROMPT`**・**`-n BENCH_N`**・**`-t 0`**・**`-s BENCH_SEED`** で `bonsai-gpu-rocm` を実行。
+2. 終了時 **`/tmp/benchmark.log`**（または **`BENCH_LOG_FILE`**）に `prompt_tokens`・`gen_tokens`・`prefill_tps`・`decode_tps`・`total_tps` 等を書き出す。
+3. **`log.push`** がログを読み、**`ISO8601|GPU_ARCH|hostname|prompt|gen|prefill|decode|total`** の 1 行を **`gpu-rocm/Makefile`** の **`# BENCH_LOG_END`** 直前に追記する。
+
+**注意:** **`make log.push` は `gpu-rocm/Makefile` を書き換えます**。コミット前に `git diff` で差分を確認してください。表の **`total_tps`** は **推論区間のみ**（重みの VRAM アップロードは含みません）。
+
 ### 参考ベンチマーク（GPU ROCm）
 
-本リポジトリでは **参考 tok/s は未計測**です。計測するときは CUDA 付録と同じコマンド（`-p "Hello" -n 16 -t 0`）と stderr の **`Prefill complete` / `Decode complete`** 行を使ってください。
+| 項目 | 値 |
+|---|---|
+| GPU | **AMD gfx1201**（ROCm。**`GPU_ARCH`**） |
+| OS | Linux |
+| モデル | `Bonsai-8B-Q1_0.gguf` |
+| ワークロード | 長文プロンプト（ChatML 後 **130** トークン）+ decode **128** トークン（**`make log.push`** 既定: **`-n 128 -t 0 -s 42`**） |
+| 表の指標（prefill / decode） | stderr の **`Prefill complete` / `Decode complete`** |
+| 表の指標（total） | ベンチログの **`total_tps`**（推論区間。重み H2D 除外） |
+| 再現 | `bonsai-8b/gpu-rocm/` で **`make log.push`** → **`make log`** |
+
+| 計測日時 | prefill tok/s | decode tok/s | total tok/s | 備考 |
+|---|---:|---:|---:|---|
+| 2026-05-27 17:21 | **175.03** | **41.89** | **67.92** | gfx1201、130+128 トークン |
+| 2026-05-27 17:29 | **174.18** | **42.06** | **68.08** | 同上（2 回目） |
+
+**CPU 表**（`-p "Hello" -n 16`）や **CUDA 付録**（prefill 18 + decode 16）とは**プロンプト長・トークン数が異なる**ため、数値をそのまま横並び比較しないでください。短いプロンプトでは手動で `./bonsai-gpu-rocm ... -p "Hello" -n 16 -t 0` を実行し、stderr の **`--- throughput ---`** を参照してください。
 
 ### よくあるトラブル（ROCm 版）
 
-**`GPU_ARCH` が空 / ビルド失敗:** `rocminfo` で GPU が見えるか確認し、`make GPU_ARCH=gfx1100 build` を試してください。**C++ headers not found:** `sudo apt install -y g++ libstdc++-dev`。**ROCm のパス:** `make ROCM=/opt/rocm build` で上書きできます。
+**`GPU_ARCH` が空 / ビルド失敗:** `rocminfo` で GPU が見えるか確認し、`make GPU_ARCH=gfx1100 build` を試してください。**C++ headers not found:** `sudo apt install -y g++ libstdc++-dev`。**ROCm のパス:** `make ROCM=/opt/rocm build` で上書きできます。**`log.push` でモデルがない:** 親ディレクトリで **`make model`** を先に実行してください。
 
 ### ソースを読む場合
 
-10. `bonsai-8b/gpu-rocm/main.c` — ホスト側（`gpu-cuda/main.c` と同趣旨）  
-11. `bonsai-8b/gpu-rocm/kernels.hip` — HIP カーネル・VRAM 管理  
-12. `bonsai-8b/gpu-rocm/gpu.h` — C API（`gpu-cuda` と同一）  
+10. `bonsai-8b/gpu-rocm/main.c` — ホスト側（`generate`・**`write_benchmark_log`**）  
+11. `bonsai-8b/gpu-rocm/kernels.hip` — HIP カーネル・VRAM 管理・**`gpu_get_device_desc`**  
+12. `bonsai-8b/gpu-rocm/gpu.h` — C API（**`gpu_get_device_desc`** 追加）  
