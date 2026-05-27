@@ -4,6 +4,18 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-27 21:34:10
+
+**`README.md` / `README.en.md`**: **Q1_0 専用**スコープ・**`cpu-blas`** の Q1_0×Q8_0 SIMD 内積説明（旧「融合内積」表記を修正）・長プロンプトベンチ表（**`avx2+fma`** 行追加）・スコープ外リストを **`doc/design.md`** と整合。
+
+**`bonsai-8b/cpu/main.c`** / **`cpu-omp/main.c`** / **`cpu-blas/main.c`**: **`Bonsai-8B-Q1_0.gguf` 専用**に整理。**Q4_K / IQ2_S / IQ3_S 等**の汎用逆量子化・**`mm_quant_rows`** 汎用パス・不要な **`ggml_dtype`** 定義を削除。線形重みは **`expect_q1_0_weight`**（**`DT_Q1_0`**）で検証。**`mm`** / **`emb_lookup`** は Q1_0 以外でエラー終了。Embedding は **`dequant_q1_0_blocks`** のみ残す。
+
+**`bonsai-8b/cpu-blas/Makefile`**: **`make log.push`** 実測 1 件を **`BENCH_LOG`** に追記（**`BENCH_SIMD=avx2+fma`**、130+128 トークン: prefill **26.34** / decode **25.85** / total **26.09** tok/s）。
+
+**`doc/design.md`**: CPU 3 バリアントの **Q1_0 専用**スコープ・実行挙動・量子化節・制約を追随。**CPU 長プロンプト**表に **`avx2+fma`** 行と SIMD 列の比較注意を追記。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-27 21:13:00
 
 **`README.md` / `README.en.md`**: ディレクトリツリーに **`gpu-rocm-wmma`** を追加。**`cpu-blas`** の **`log`/`log.push`**・長プロンプトベンチ表を本文に追加。**`gpu-rocm`** ベンチ 3 件目を追記。**付録「AMD ROCm / HIP + rocWMMA（`gpu-rocm-wmma`）」** を新設。片付け・スコープ表記を追随。

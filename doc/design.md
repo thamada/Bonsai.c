@@ -32,9 +32,9 @@
 
 | ソース | 実行環境 | 概要 |
 |--------|----------|------|
-| `bonsai-8b/cpu/main.c` | **CPU、単スレッド** | GGUF mmap。**Q1_0** は融合行内積（**`dot_q1_0_row`**、中間 FP32 展開なし）。他量子化型はブロック単位で部分復元して GEMV。Norm 等は F32。`libm` のみ。 |
-| `bonsai-8b/cpu-omp/main.c` | **CPU、OpenMP マルチスレッド** | **`cpu`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は融合行内積（**`mm_q1_0_rows`** を OpenMP 行並列）。他量子化型はブロック dequant + OpenMP。Attention・SwiGLU 等も **OpenMP**。 |
-| `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一 GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は活性化を **Q8_0** 化して **`vec_dot_q1_0_q8_0`**（AVX2 時は ggml-cpu x86 準拠 SIMD、**`-mfma`**）。Attention はヘッドあたり **2 回の `cblas_sgemv`**。F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
+| `bonsai-8b/cpu/main.c` | **CPU、単スレッド** | **`Bonsai-8B-Q1_0.gguf` 専用**。GGUF mmap。線形重みは **Q1_0** のみ（**`expect_q1_0_weight`** で検証）。**Q1_0** GEMV は融合行内積（**`dot_q1_0_row`**、中間 FP32 展開なし）。Embedding は **`dequant_q1_0_blocks`**。Norm 等は F32。`libm` のみ。 |
+| `bonsai-8b/cpu-omp/main.c` | **CPU、OpenMP マルチスレッド** | **`cpu`** と同一スコープ・GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は融合行内積（**`mm_q1_0_rows`** を OpenMP 行並列）。Attention・SwiGLU 等も **OpenMP**。 |
+| `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一スコープ・GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は活性化を **Q8_0** 化して **`vec_dot_q1_0_q8_0`**（AVX2 時は ggml-cpu x86 準拠 SIMD、**`-mfma`**）。Attention はヘッドあたり **2 回の `cblas_sgemv`**。Norm 等 F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
 | `bonsai-8b/gpu-cuda/main.c` + **`kernels.cu`** | **NVIDIA GPU、CUDA（付録）** | 上記 CPU 3 バリアントと**同趣旨**だが **CUDA 依存**。README 付録参照。NVFP4（Blackwell）オプションあり。 |
 | `bonsai-8b/gpu-rocm/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP（付録）** | **`gpu-cuda`** と同 API・アルゴリズム（Q8_0 活性化 + Q1_0 GEMV、Flash Attention、prefill バッチ）。**hipBLAS 不要**。 |
 | `bonsai-8b/gpu-rocm-wmma/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP + rocWMMA（付録）** | **`gpu-rocm`** 派生。**Prefill** の **QK^T** のみ **rocWMMA 16×16×16**（**PV** は F32 スカラー）。**Decode**・線形層は **`gpu-rocm`** 同一。短プロンプトでは **`gpu-rocm`** より Prefill が遅い場合あり。 |
@@ -79,9 +79,11 @@
 
 | 計測日時 | SIMD | prefill tok/s | decode tok/s | total tok/s | 備考 |
 |----------------|------|-------------:|-------------:|------------:|------|
-| 2026-05-27 19:39 | **avx** | **1.96** | **1.99** | **1.98** | 130+128 トークン |
+| 2026-05-27 19:39 | **avx** | **1.96** | **1.99** | **1.98** | 130+128 トークン（AVX のみホスト） |
+| 2026-05-27 19:57 | **avx** | **1.97** | **2.00** | **1.99** | 同上（2 回目） |
+| 2026-05-27 21:31 | **avx2+fma** | **26.34** | **25.85** | **26.09** | 130+128 トークン（AVX2+FMA ホスト。**`BENCH_SIMD`** 列は **`ARCH_FLAGS`** 短縮ラベル） |
 
-短プロンプト CPU 表（5950X・`-p "Hello" -n 16`）とは**直接比較しない**。
+短プロンプト CPU 表（5950X・`-p "Hello" -n 16`）とは**直接比較しない**。**SIMD 列**（**`avx`** vs **`avx2+fma`**）は計測ホスト・**`ARCH_FLAGS`** が異なるため、長プロンプト表内でも**横並び比較は SIMD 条件を揃えてから**行う。
 
 #### GPU CUDA（2026-05-21 計測）
 
@@ -153,7 +155,7 @@
 | `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-omp/Makefile` | **`bonsai-cpu-omp`** の生成（`-fopenmp`）。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、**`-funroll-loops -ffast-math`**）。**`/proc/cpuinfo`** の `flags` から **AVX2 → `-mavx2`（FMA ありなら `-mfma`）**、AVX のみ → **`-mavx`**、それ以外 → **`-march=x86-64`** を **`ARCH_FLAGS`** に自動設定（上書き: **`make build ARCH_FLAGS='-mavx2 -mfma'`**）。ビルド時に **`SIMD flags:`** を表示。`pkg-config openblas` があれば `-I`/`-L` を自動付与。**`log`** / **`log.push`**（**`BENCH_SIMD`** 列付き **`BENCH_LOG`** 追記）。 |
-| `bonsai-8b/cpu/main.c` | CPU 単スレッド推論の**参照ソース**（アルゴリズムの正として追う）。**単一 `main.c`**（標準 C + `libm` のみ）。 |
+| `bonsai-8b/cpu/main.c` | CPU 単スレッド推論の**参照ソース**（アルゴリズムの正として追う）。**`Bonsai-8B-Q1_0.gguf` 専用**（線形重み **Q1_0** + norm **F32**）。**単一 `main.c`**（標準 C + `libm` のみ）。 |
 | `bonsai-8b/cpu-omp/main.c` | **`cpu/main.c` をベースに OpenMP を付与した派生**（挙動確認はまず `cpu` を正とする）。**単一 `main.c`**（+ OpenMP）。 |
 | `bonsai-8b/cpu-blas/main.c` | **`cpu-omp` をベースに OpenBLAS・Q1_0×Q8_0 SIMD 内積・Attention `sgemv` 集約を付与した派生**（スループット試行の推奨経路）。**単一 `main.c`**（+ OpenMP + OpenBLAS）。終了時 **`write_benchmark_log`**（**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**）。 |
 | `bonsai-8b/gpu-cuda/main.c` | **`cpu-blas` をベースに CPU 演算を GPU API 呼び出しへ置換したホスト側**（GGUF 読み込み・トークナイザ・サンプリングは CPU）。**`gpu.h`** の C API 経由で **`kernels.cu`** を呼ぶ。 |
@@ -403,7 +405,7 @@ make run
 
 3 バリアントは **RoPE**・**`chat_encode`** を共通とする。**Q1_0** の行列積は **`cpu`** / **`cpu-omp`** が融合行内積（**`dot_q1_0_row`**）、**`cpu-blas`** が **Q8_0 活性化 + `vec_dot_q1_0_q8_0`**（llama.cpp 準拠）と異なる。差分は並列化（OpenMP）、Q1_0 カーネル、Attention / F32 行への OpenBLAS 利用（**`cpu-blas`** のみ）である。
 
-重みは **mmap した GGUF** 上の量子化 blob を参照する。**`cpu`** / **`cpu-omp`** の **Q1_0** は **`mm_q1_0_rows`** で符号ビットと FP32 活性の融合行内積（中間 FP32 ブロックなし）。**`cpu-blas`** の **Q1_0** は **`mm_q1_0_rows`** が活性化 **`x`** を一度 **`quantize_row_q8_0`** し、各行を **`vec_dot_q1_0_q8_0`** で計算（**`State.q8`** バッファを使い回し）。**Q1_0 以外**の量子化型は出力行／ブロックごとに部分復元して内積する（全テンソルの float 一括展開はしない）。KV・活性は主に float。サンプリングはホスト上の logits に対して行う。
+重みは **mmap した GGUF** 上の量子化 blob を参照する。**CPU 3 バリアント**は **`Bonsai-8B-Q1_0.gguf` 専用** — 線形重みテンソルは **`load_weights`** で **`expect_q1_0_weight`**（**`DT_Q1_0`**）を要求し、**`mm`** / **`emb_lookup`** も **Q1_0 以外はエラー終了**。**`cpu`** / **`cpu-omp`** の **Q1_0** GEMV は **`mm_q1_0_rows`** で符号ビットと FP32 活性の融合行内積（中間 FP32 ブロックなし）。**`cpu-blas`** の **Q1_0** は **`mm_q1_0_rows`** が活性化 **`x`** を一度 **`quantize_row_q8_0`** し、各行を **`vec_dot_q1_0_q8_0`** で計算（**`State.q8`** バッファを使い回し）。Embedding は **`dequant_q1_0_blocks`** で行復元。KV・活性は F32。サンプリングはホスト上の logits に対して行う。
 
 **`-p` プロンプト**は **`chat_encode`** で ChatML 化する。GGUF **`tokenizer.chat_template`** の単一 user ターン + **`add_generation_prompt`** に合わせ、既定 system 文は挿入せず、assistant 開始は空 think ブロック付き（ソース内リテラル。PrismML **llama.cpp -cnv** と同趣旨）。
 
@@ -437,8 +439,7 @@ make run
 1. **起動時**: `openblas_set_num_threads(1)` — BLAS 内部スレッドと OpenMP のネスト並列を避ける。
 2. **Q1_0 GEMV**（`mm_q1_0_rows`）: 活性化を **`quantize_row_q8_0`**（AVX/AVX2 時は SIMD、それ以外は参照実装）で **Q8_0** 化し、各行を **`vec_dot_q1_0_q8_0`** で内積（**`ggml_vec_dot_q1_0_q8_0`** / **`ggml-cpu/arch/x86/quants.c`** 準拠。AVX2 時は **`_mm256_maddubs_epi16`** 等と **`-mfma`**）。`d` 行まとめて同一量子化済み **`q8`** を使い回す。
 3. **Attention**: ヘッドごとに K 行列（`(pos+1)×hd`、`lda=kv_dim`）と q の **`cblas_sgemv(NoTrans)`**、続けて V の **`cblas_sgemv(Trans)`** で出力ヘッドを得る（従来の `(pos+1)` 回の `sdot`/`saxpy` を集約）。
-4. **F32 行**（`mm_f32`）: OpenMP で行帯を分割し、帯内は serial `sgemv`。
-5. **その他量子化型・F16**: `cpu-omp` と同様の汎用パス（OpenMP 行並列 + ブロック dequant）。
+4. **F32 行**（`mm_f32`、norm 重み等）: OpenMP で行帯を分割し、帯内は serial `sgemv`。
 
 ## 実行時の挙動（gpu-cuda）
 
@@ -545,7 +546,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 ### レイヤー構成（概略）
 
-1. **GGUF / GGML dtype**: 必要な tensor dtype（**Q1_0** 等）とブロック構造を定義。**`gpu-rocm/main.c`** はメタデータ用 enum のみ（**CPU dequant ブロック型・IQ グリッド表は持たない**）。量子化レイアウトの実体は **`gpu.h`** の **`GpuBlockQ1_0`** / **`GpuBlockQ8_0`** と **`kernels.hip`**。
+1. **GGUF / GGML dtype**: **CPU 3 バリアント**は **`ggml_dtype` の最小 subset**（**`DT_F32`**・**`DT_Q1_0`**。**`cpu-blas`** は活性化用に **`DT_Q8_0`** / **`BlockQ8_0`** も定義）と **`BlockQ1_0`** のみ。**Q4_K / IQ2_S / IQ3_S 等**の汎用逆量子化は **2026-05-27 に削除**（**`Bonsai-8B-Q1_0.gguf` 専用**）。**`gpu-rocm/main.c`** はメタデータ用 enum のみ（**CPU dequant ブロック型・IQ グリッド表は持たない**）。GPU 側量子化レイアウトの実体は **`gpu.h`** の **`GpuBlockQ1_0`** / **`GpuBlockQ8_0`** と **`kernels.hip`** / **`kernels.cu`**。
 2. **モデル構造体**: `Config`、`TensorInfo`、トークナイザ、重み参照、`State`（KV・中間バッファ）。
 3. **ロード**: mmap、metadata（`qwen3.*`）、tensor テーブル、tokenizer。
 4. **推論**: CPU 3 バリアントは 1 トークンずつ forward（prefill も teacher forcing で逐次）。**`gpu-cuda`** / **`gpu-rocm`** は prefill を **`gpu_forward_prefill`** でバッチ、decode を **`gpu_forward`** で逐次。生成区間はサンプリング。
@@ -565,9 +566,11 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 ### 量子化と行列積
 
+**対象 GGUF**: 既定 **`Bonsai-8B-Q1_0.gguf`**。線形重みは **Q1_0**、norm 重みは **F32**。**CPU 3 バリアント**は他量子化形式の GGUF を**未対応**（ロード時 **`expect_q1_0_weight`** または **`mm`** でエラー終了）。
+
 **Q1_0** は **QK1_0=128** 要素を単位とする。
 
-- **`cpu`**: **`dot_q1_0_row`** / **`mm_q1_0_rows`** で融合行内積（`ggml-quants.c` の dequantize + 内積と同等、中間 FP32 ブロックなし）。
+- **`cpu`**: **`dot_q1_0_row`** / **`mm_q1_0_rows`** で融合行内積（`ggml-quants.c` の dequantize + 内積と同等、中間 FP32 ブロックなし）。Embedding は **`dequant_q1_0_blocks`**。
 - **`cpu-omp`**: 同上。行ループを **`#pragma omp parallel for`** で並列化。
 - **`cpu-blas`**: **`quantize_row_q8_0`** + **`vec_dot_q1_0_q8_0`**（llama.cpp **`ggml_vec_dot_q1_0_q8_0`** 準拠。AVX2 で SIMD、非 AVX2 は generic 参照）。**`State`** に **`BlockQ8_0 *q8`** を確保（`max(dim, hidden_dim) / QK8_0` ブロック）。
 - **`gpu-cuda`（`make run.no-fp4`）**: **Q8_0 活性化 + `vec_dot_q1_0_q8_0` CUDA カーネル**（単トークン + **`*_batch`** 版）。
@@ -598,7 +601,8 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 ## 制約・既知の制限
 
 - **8B を CPU で動かすため重い**場合がある。単スレッド **`cpu`** は参考実装・検証向け（上記 CPU 参考計測 decode **0.24 tok/s**）。**`cpu-omp`** は decode **4.94 tok/s** 程度。実用的な CPU 試行は **`cpu-blas`**（参考 decode **30.79 tok/s**）を推奨。
-- **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする（Makefile は **AVX2 不可なら `-mavx` または `-march=x86-64`**）。**`-ffast-math`** と **FMA 対応時の `-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。旧 **`-march=native`** 固定は廃止（クロスビルド・非 x86 ホストでは **`ARCH_FLAGS`** を明示指定）。**`make log.push`** は **`cpu-blas/Makefile` を書き換える**（コミット前に差分確認）。
+- **CPU 3 バリアント**は **`Bonsai-8B-Q1_0.gguf` 専用**（線形重み **Q1_0** + norm **F32**）。**Q4_K / IQ2_S / IQ3_S 等**の汎用逆量子化パスは **2026-05-27 削除**。他 GGUF は **`expect_q1_0_weight`** / **`mm`** でエラー終了。
+- **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする（Makefile は **AVX2 不可なら `-mavx` または `-march=x86-64`**）。**`-ffast-math`** と **FMA 対応時の `-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。長プロンプト **`make log.push`** では **`avx2+fma`** と **`avx`** で total tok/s が大きく異なりうる（上記 CPU 長プロンプト表）。旧 **`-march=native`** 固定は廃止（クロスビルド・非 x86 ホストでは **`ARCH_FLAGS`** を明示指定）。**`make log.push`** は **`cpu-blas/Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-cuda`**（付録・NVIDIA）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。README 付録および本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考（2026-05-21）: **`make run`（NVFP4）** prefill **~1365 tok/s**、decode **~90.4 tok/s**；**`make run.no-fp4`** prefill **~293 tok/s**、decode **~47.0 tok/s**。**`make run.no-fp4`** 既定は PTX **`compute_86`**。**`make run`** は **CUDA 13**・**`sm_120a`**・**CUTLASS**・**`BONSAI_FP4=1`**（**`make blackwell`**、要 **sudo** のことがある）。Blackwell の静的 shared 上限 **48 KB** のため **`FA_BR=32`**（**`FA_BR=64`** はコンパイル不可）。**VRAM** に prefill バッチ（**`max_seq` 分**）と FP4 重みキャッシュを含む。**`n_tokens ≤ max_seq`**（**`-l`**）。**`head_dim > FA_HD`（128）** では Attention no-op。
 - **`gpu-rocm`**（付録・AMD）: **ROCm**・**`hipcc`**・AMD GPU 実機が必要。本書「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」参照。**hipBLAS 不要**。**NVFP4 非対応**。**`GPU_ARCH`** は **`rocminfo`** 自動（未検出時は手動指定）。**`g++` / `libstdc++-dev`** 必須。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`** 制約は **`gpu-cuda`** と同趣旨。参考ベンチマーク: 上記 **GPU ROCm 表**（gfx1201・長プロンプト 130 + 生成 128）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-rocm-wmma`**（付録・AMD・実験）: **`gpu-rocm`** 要件に加え **rocWMMA**（ROCm 同梱ヘッダ）。Prefill Attention QK^T の WMMA 化のみ。**短プロンプトでは `gpu-rocm` より Prefill が遅い場合あり**（README 付録・本書 **GPU ROCm WMMA 表**）。

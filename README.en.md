@@ -8,12 +8,12 @@ This repository runs **[PrismML](https://prismml.com/)’s 1-bit Bonsai 8B** fro
 
 Per [Announcing 1-bit Bonsai: The First Commercially Viable 1-bit LLMs](https://prismml.com/news/bonsai-8b) (PrismML, 2026), **1-bit Bonsai 8B** is a **true 1-bit model** end to end—embeddings, attention, MLP, and LM head are all 1-bit, with **no higher-precision “escape hatches”**—at roughly **8.2B parameters**. Weights are released under the **Apache License 2.0**. The post emphasizes **intelligence density**, deployability, and a compact footprint (about **1.15 GB**).
 
-**This repo loads** the Hugging Face GGUF **`Bonsai-8B-Q1_0.gguf`** (Q1_0 quantization). Scope is **text prompt in, text out**; **image input is not supported**.
+**This repo loads** the Hugging Face GGUF **`Bonsai-8B-Q1_0.gguf`** (Q1_0 quantization). The **three CPU variants** (`cpu`, `cpu-omp`, `cpu-blas`) are **for this file only**—linear weights must be **Q1_0**, norms **F32**; other GGUF quantizations exit with an error. Scope is **text prompt in, text out**; **image input is not supported**.
 
 **This project does not link PyTorch, TensorFlow, JAX, ONNX Runtime, or other ML userland libraries.**
 
 The reference implementation uses **standard C and `libm` only**, built from **`bonsai-8b/cpu/main.c`** into a **single-threaded CPU** binary (`bonsai-cpu`). For faster experimentation on multicore CPUs, **`bonsai-8b/cpu-omp/main.c`** builds **`bonsai-cpu-omp`**, parallelized with **OpenMP** (**standard C + `libm` + OpenMP runtime**).  
-For practical throughput on **`Bonsai-8B-Q1_0`**, **`bonsai-8b/cpu-blas/`** builds **`bonsai-cpu-blas`** with **OpenMP + OpenBLAS** and a **fused Q1_0 dot-product kernel** (**standard C + `libm` + OpenMP + OpenBLAS**).
+For practical throughput on **`Bonsai-8B-Q1_0`**, **`bonsai-8b/cpu-blas/`** builds **`bonsai-cpu-blas`** with **OpenMP + OpenBLAS** and **Q1_0×Q8_0 SIMD dot products** (llama.cpp **`ggml_vec_dot_q1_0_q8_0`** style) (**standard C + `libm` + OpenMP + OpenBLAS**).
 
 ### Why avoid ML libraries?
 
@@ -149,6 +149,8 @@ make build
 
 ## Build & run (CPU)
 
+**For `Bonsai-8B-Q1_0.gguf` only.** Linear weights use **Q1_0** fused row dots (**`dot_q1_0_row`**); embedding uses **`dequant_q1_0_blocks`**. Norm weights are **F32**.
+
 ### Build
 
 ```bash
@@ -183,7 +185,7 @@ make run MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
 
 ## Build & run (CPU + OpenMP, `cpu-omp`)
 
-Same model and CLI as `cpu`; matmul, attention, SwiGLU, etc. are parallelized with **OpenMP**.
+Same model, CLI, and **Q1_0-only** scope as `cpu`; matmul, attention, SwiGLU, etc. are parallelized with **OpenMP**.
 
 ### Build
 
@@ -215,7 +217,7 @@ make run PROMPT="Give a one-sentence introduction of yourself."
 
 ## Build & run (CPU + OpenMP + OpenBLAS, `cpu-blas`, recommended)
 
-Same model and CLI as `cpu-omp`, with a **fused Q1_0 dot kernel** (no intermediate FP32 dequant buffer) and **OpenBLAS** (batched `sgemv` for attention and F32 rows). OpenBLAS is pinned to **one thread**; parallelism comes from **OpenMP** (avoids nested threading).
+Same model, CLI, and **Q1_0-only** scope as `cpu-omp`, with activations quantized to **Q8_0** and **`vec_dot_q1_0_q8_0`** (SIMD on AVX2, llama.cpp-style) plus **OpenBLAS** (batched `sgemv` for attention and F32 norm rows). OpenBLAS is pinned to **one thread**; parallelism comes from **OpenMP** (avoids nested threading).
 
 ### Build
 
@@ -285,13 +287,16 @@ Under these conditions, **`cpu-blas` was about 6× faster than `cpu-omp`** and *
 
 | Item | Value |
 |---|---|
-| CPU | AVX (**`BENCH_SIMD=avx`**, auto-detected from cpuinfo on the benchmark host) |
 | Workload | **130** tokens after ChatML + **128** decode tokens (**`-n 128 -t 0 -s 42`**) |
-| Reproduce | In **`bonsai-8b/cpu-blas/`**: **`make log.push`** |
+| Metrics | **`prefill_tps` / `decode_tps` / `total_tps`** from **`/tmp/benchmark.log`** (or **`BENCH_LOG_FILE`**)—inference interval only |
+| Reproduce | In **`bonsai-8b/cpu-blas/`**: **`make log.push`** → **`make log`** |
+| SIMD column | Short label for **`ARCH_FLAGS`** on the benchmark host (**`BENCH_SIMD`**). **`avx`** vs **`avx2+fma`** are **different hosts**—compare like with like within the table |
 
 | Timestamp | SIMD | Prefill tok/s | Decode tok/s | Total tok/s |
 |---|---|---:|---:|---:|
 | 2026-05-27 19:39 | **avx** | **1.96** | **1.99** | **1.98** |
+| 2026-05-27 19:57 | **avx** | **1.97** | **2.00** | **1.99** |
+| 2026-05-27 21:31 | **avx2+fma** | **26.34** | **25.85** | **26.09** |
 
 Do **not** compare this table directly to the short-prompt table above (5950X, `-p "Hello" -n 16`).
 
@@ -383,7 +388,7 @@ Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-
 2. `doc/design.md`  
 3. `bonsai-8b/cpu/main.c` — single-thread reference implementation  
 4. `bonsai-8b/cpu-omp/main.c` — OpenMP parallel variant  
-5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + fused Q1_0 kernel  
+5. `bonsai-8b/cpu-blas/main.c` — OpenMP + OpenBLAS + Q1_0×Q8_0 SIMD dot products  
 
 ## Out of scope
 
@@ -392,7 +397,7 @@ Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-
 - Batch inference tuning (GPU appendix prefill batching is for faster decode, not server batching)  
 - Image input  
 - Server or Web API packaging  
-- Universal support for every GGUF quantization  
+- **GGUF files other than `Bonsai-8B-Q1_0.gguf`** for the CPU variants (**Q1_0 linear weights + F32 norms** only; legacy Q4_K / IQ generic paths were removed)  
 - Guaranteed numerical match with official implementations  
 
 The goal is to **understand, experiment with, and adapt** **Bonsai-8B-Q1_0** (GGUF) text inference in **C**.
