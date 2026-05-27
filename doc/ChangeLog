@@ -4,6 +4,26 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-27 17:20:00
+
+**`README.md` / `README.en.md`**: ディレクトリツリーに **`gpu-cuda`** / **`gpu-rocm`** を追加。**`cpu-blas`** の **`ARCH_FLAGS`**（cpuinfo 自動検出）とベンチマーク備考を更新（旧 **`-march=native`** 表記を削除）。**`make clean`**・**`bonsai-8b/Makefile`** 案内に **`gpu-rocm`** を追加。「扱わないもの」から ROCm/HIP を外し **AMD NPU** 等に整理（GPU 付録は参考実装と明記）。**付録「AMD ROCm / HIP 実装（`gpu-rocm`）」** を新設（ビルド・実行・要件・トラブルシュート・ソース案内。ベンチマーク未収録）。
+
+**`doc/design.md`**: README 入口・ドキュメント役割・チェックリストを上記に追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-27 17:10:02
+
+**`bonsai-8b/gpu-rocm/`**（新規）: AMD Radeon 向け **ROCm/HIP** 推論バリアント。**`main.c`**（ホスト）、**`kernels.hip`**（HIP カーネル）、**`gpu.h`**（**`gpu-cuda` と同一 C API**）、**`Makefile`**（**`hipcc`**、**`rocminfo`** から **`GPU_ARCH`（`gfx*`）自動検出**、**`--offload-arch`**、**`FA_BR` 既定 32**、**`.DEFAULT_GOAL := run`**）。**Q1_0×Q8_0 GEMV**・**Flash Attention** decode/prefill・**`gpu_forward`** / **`gpu_forward_prefill`**（**`gpu-cuda` の FP4 無効経路と同型**）。**hipBLAS 不要**。
+
+**`bonsai-8b/Makefile`**: **`build.gpu-rocm`** / **`run.gpu-rocm`** を追加。**`clean`** に **`gpu-rocm`** を委譲。
+
+**`.gitignore`**: **`bonsai-8b/gpu-rocm/bonsai-gpu-rocm`**、**`bonsai-8b/gpu-rocm/*.o`** を追加。
+
+**`doc/design.md`**: **`gpu-rocm`** 付録（概要・バリアント表・ディレクトリ／Make 表・ビルド手順・実行挙動・量子化・制約・ドキュメント役割）。旧 ROCm 単一 `main.c` 削除と **`gpu-rocm` 新設**の区別を明記。GPU ROCm ベンチマークは未収録。README 付録は **`gpu-cuda` のみ**である旨・**`gpu.h` 同一**・**`hipcc -x hip` 分割ビルド**・**`ROCM` / `GPU_ARCH` 未検出時のエラー**を追記。
+
+**`doc/ChangeLog`**: 本エントリ（**2026-05-27 17:13:57** 追記）。
+
 ## 2026-05-27 16:33:04
 
 **`bonsai-8b/cpu-blas/Makefile`**: **`-march=native`** 固定を廃止。**`/proc/cpuinfo`** の `flags` から **AVX2 / AVX / FMA** を検出し **`ARCH_FLAGS`** を自動設定（AVX2+FMA → **`-mavx2 -mfma`**、AVX のみ → **`-mavx`**、それ以外 → **`-march=x86-64`**）。上書き例: **`make build ARCH_FLAGS='-mavx2 -mfma'`**。ビルド時に **`SIMD flags:`** を表示。
