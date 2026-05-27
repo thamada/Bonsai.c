@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-27 16:33:04
+
+**`bonsai-8b/cpu-blas/Makefile`**: **`-march=native`** 固定を廃止。**`/proc/cpuinfo`** の `flags` から **AVX2 / AVX / FMA** を検出し **`ARCH_FLAGS`** を自動設定（AVX2+FMA → **`-mavx2 -mfma`**、AVX のみ → **`-mavx`**、それ以外 → **`-march=x86-64`**）。上書き例: **`make build ARCH_FLAGS='-mavx2 -mfma'`**。ビルド時に **`SIMD flags:`** を表示。
+
+**`doc/design.md`**: **`cpu-blas/Makefile`** 一行・CPU 参考ベンチマークの備考・制約（**`ARCH_FLAGS`** 自動検出・旧 **`-march=native`** 廃止）を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-21 12:56:15
 
 **`README.md` / `README.en.md`**: GPU 付録に **NVFP4 の概要**（E2M1 8 段階の値表、ビット割り当て、2 要素/byte パック、UE4M3）を追加。**0.75 は表現値ではなく量子化境界**である旨と Model-Optimizer 参照を追記。

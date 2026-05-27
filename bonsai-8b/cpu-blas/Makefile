@@ -5,11 +5,37 @@
 #   OPENBLAS_NUM_THREADS=1 または OMP_NUM_THREADS と調整してください。
 
 CC      ?= cc
-# -march=native: 実行ホストの SIMD 命令を有効化（Q1_0 内積カーネルの自動ベクトル化に重要）
-# -funroll-loops: 8-bit ごとの内側ループを展開
-# -ffast-math: FP 加算の結合則を許可（縮小総和を SIMD で並列化させる。LLM 推論用途では十分許容範囲）
-CFLAGS  ?= -O3 -std=c11 -Wall -Wextra -Wno-unused-parameter -fopenmp \
-           -march=native -funroll-loops -ffast-math -mfma
+# /proc/cpuinfo から SIMD を検出。AVX2 不可なら AVX に落とす（-mfma は FMA 対応 CPU のみ）。
+# 上書き例: make build ARCH_FLAGS='-mavx2 -mfma'
+BASE_CFLAGS := -O3 -std=c11 -Wall -Wextra -Wno-unused-parameter -fopenmp \
+               -funroll-loops -ffast-math
+
+ifneq ($(wildcard /proc/cpuinfo),)
+  CPU_FLAGS := $(shell grep -m1 '^flags' /proc/cpuinfo 2>/dev/null)
+  HAVE_AVX2 := $(findstring avx2,$(CPU_FLAGS))
+  HAVE_AVX  := $(findstring avx,$(CPU_FLAGS))
+  HAVE_FMA  := $(findstring fma,$(CPU_FLAGS))
+else
+  HAVE_AVX2 :=
+  HAVE_AVX  :=
+  HAVE_FMA  :=
+endif
+
+ARCH_FLAGS ?=
+ifeq ($(ARCH_FLAGS),)
+  ifeq ($(HAVE_AVX2),avx2)
+    ARCH_FLAGS := -mavx2
+    ifneq ($(HAVE_FMA),)
+      ARCH_FLAGS += -mfma
+    endif
+  else ifeq ($(HAVE_AVX),avx)
+    ARCH_FLAGS := -mavx
+  else
+    ARCH_FLAGS := -march=x86-64
+  endif
+endif
+
+CFLAGS  ?= $(BASE_CFLAGS) $(ARCH_FLAGS)
 LDFLAGS ?= -fopenmp -lopenblas -lm
 
 MODEL   ?= ../Bonsai-8B-Q1_0.gguf
@@ -26,6 +52,7 @@ endif
 .PHONY: build run clean
 
 build:
+	@echo "SIMD flags: $(ARCH_FLAGS)"
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o bonsai-cpu-blas main.c $(LDFLAGS)
 
 run: build
