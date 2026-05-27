@@ -10,6 +10,7 @@ PROMPT  ?= Hello, how are you?
 	build.cpu run.cpu \
 	build.cpu-blas run.cpu-blas \
 	build.gpu-cuda run.gpu-cuda \
+	build.gpu-rocm run.gpu-rocm \
 	blackwell build.blackwell run.blackwell \
 	clean
 
@@ -83,6 +84,14 @@ run.blackwell: build.blackwell
 	./gpu-cuda/bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
 
 # -----------------------------------------------------------------------------
+# GPU ROCm/HIP（ソースは gpu-rocm/main.c + kernels.hip）
+build.gpu-rocm:
+	cd gpu-rocm && $(MAKE) build
+
+run.gpu-rocm: build.gpu-rocm
+	./gpu-rocm/bonsai-gpu-rocm "$(MODEL)" -p "$(PROMPT)"
+
+# -----------------------------------------------------------------------------
 all: build.cpu
 
 # -----------------------------------------------------------------------------
@@ -90,3 +99,4 @@ clean:
 	cd cpu && make clean
 	cd cpu-blas && make clean
 	cd gpu-cuda && make clean
+	cd gpu-rocm && make clean

@@ -59,12 +59,14 @@ An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for sm
     ├── cpu-omp/
     │   ├── Makefile
     │   └── main.c
-    └── cpu-blas/
-        ├── Makefile
-        └── main.c
+    ├── cpu-blas/
+    │   ├── Makefile
+    │   └── main.c
+    ├── gpu-cuda/          # appendix (end of this README)
+    └── gpu-rocm/          # appendix (end of this README)
 ```
 
-The reference decoder lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the CPU optimized build is **`bonsai-8b/cpu-blas/`**.
+The reference decoder lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the CPU optimized build is **`bonsai-8b/cpu-blas/`**. GPU builds are optional appendices **`gpu-cuda`** (NVIDIA) and **`gpu-rocm`** (AMD)—see the sections at the end of this file.
 
 ## Beginners: what happens during LLM inference?
 
@@ -219,7 +221,7 @@ cd bonsai-8b/cpu-blas
 make build
 ```
 
-Produces **`bonsai-cpu-blas`**. From `bonsai-8b/`: `make build.cpu-blas` / `make run.cpu-blas`.
+Produces **`bonsai-cpu-blas`** (the build prints **`SIMD flags:`**—**`/proc/cpuinfo`** selects **`-mavx2`** and **`-mfma`** when available; override with `make build ARCH_FLAGS='-mavx2 -mfma'`). From `bonsai-8b/`: `make build.cpu-blas` / `make run.cpu-blas`.
 
 ### Run
 
@@ -252,7 +254,7 @@ make run.cpu-blas PROMPT="Hello"
 |---|---:|---:|---|
 | `cpu/bonsai-cpu` | 66.8 s | **0.24 tok/s** | Single-threaded, `-O3` (`cpu/Makefile` defaults) |
 | `cpu-omp/bonsai-cpu-omp` | 3.2 s | **4.94 tok/s** | `-O3 -fopenmp` (`cpu-omp/Makefile` defaults) |
-| `cpu-blas/bonsai-cpu-blas` | 0.5 s | **30.79 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`, OpenBLAS at 1 thread |
+| `cpu-blas/bonsai-cpu-blas` | 0.5 s | **30.79 tok/s** | `-O3 -fopenmp -ffast-math`, `ARCH_FLAGS` from cpuinfo (5950X: `-mavx2 -mfma`), OpenBLAS at 1 thread |
 
 Under these conditions, **`cpu-blas` was about 6× faster than `cpu-omp`** and **about 128× faster than `cpu`** (`cpu-omp` was about 21× faster than `cpu`). Generated text (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`) matched on all three CPU binaries.
 
@@ -300,7 +302,7 @@ cd bonsai-8b
 make clean
 ```
 
-`make clean` at `bonsai-8b/` removes **`cpu/bonsai-cpu`** and **`cpu-blas/bonsai-cpu-blas`**. To remove **`cpu-omp/bonsai-cpu-omp`**, run `make clean` inside **`bonsai-8b/cpu-omp`**. The GGUF file is **not** deleted.
+`make clean` at `bonsai-8b/` removes **`cpu/bonsai-cpu`**, **`cpu-blas/bonsai-cpu-blas`**, and appendix binaries **`gpu-cuda/bonsai-gpu-cuda`** and **`gpu-rocm/bonsai-gpu-rocm`**. To remove **`cpu-omp/bonsai-cpu-omp`**, run `make clean` inside **`bonsai-8b/cpu-omp`**. The GGUF file is **not** deleted.
 
 ## Troubleshooting
 
@@ -344,8 +346,8 @@ Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-
 ## Out of scope
 
 - Training / fine-tuning  
-- **ROCm/HIP, AMD NPU**, **Vulkan, Metal**, and **other GPU runtimes**  
-- Batch inference tuning  
+- **AMD NPU (e.g. XDNA2)**, **Vulkan, Metal**, and similar (**`gpu-cuda`** / **`gpu-rocm`** are optional appendix builds; the main focus is the three CPU variants)  
+- Batch inference tuning (GPU appendix prefill batching is for faster decode, not server batching)  
 - Image input  
 - Server or Web API packaging  
 - Universal support for every GGUF quantization  
@@ -358,7 +360,7 @@ The goal is to **understand, experiment with, and adapt** **Bonsai-8B-Q1_0** (GG
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-If something fails, check **`bonsai-8b/Makefile`** (`model`, `build.cpu`, `build.cpu-blas`, `run.cpu-blas`, …), per-subdir Makefiles, and the model path you pass at runtime.
+If something fails, check **`bonsai-8b/Makefile`** (`model`, `build.cpu`, `build.cpu-blas`, `run.cpu-blas`, `build.gpu-cuda`, `build.gpu-rocm`, `build.blackwell`, …), per-subdir Makefiles, and the model path you pass at runtime.
 
 ---
 
@@ -628,7 +630,7 @@ With the same prompt and `-t 0`, **both configurations** matched **`cpu-blas`** 
 
 **CUDA / `nvcc` not found:** Install CUDA Toolkit and an NVIDIA driver, then rebuild in **`gpu-cuda`**. Older CUDA may not support `-arch=native`; the default builds PTX (`compute_86`) for driver JIT. Set **`CUDA_GENCODE`** for your GPU (see **`gpu-cuda/Makefile`**). If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
-**Clean:** `make clean` at the repo root also removes **`gpu-cuda/bonsai-gpu-cuda`**.
+**Clean:** `make clean` at the repo root also removes **`gpu-cuda/bonsai-gpu-cuda`** and **`gpu-rocm/bonsai-gpu-rocm`**.
 
 ### Source files to read
 
@@ -636,3 +638,80 @@ With the same prompt and `-t 0`, **both configurations** matched **`cpu-blas`** 
 7. `bonsai-8b/gpu-cuda/kernels.cu` — forward pass and `gpu_mm*` dispatch (to `fp4_bonsai` when FP4 is enabled)  
 8. `bonsai-8b/gpu-cuda/fp4_bonsai.cu` / `fp4_gemm.cu` — Q1_0 ↔ NVFP4 bridge and CUTLASS GEMM (when `BONSAI_FP4=1`)  
 9. `bonsai-8b/gpu-cuda/gpu.h` — C API (`gpu_forward_prefill`, etc.)  
+
+---
+
+## AMD ROCm / HIP implementation (`gpu-rocm`)
+
+**`bonsai-8b/gpu-rocm/` is also an appendix outside this repo’s main goals** (single C source, minimal dependencies). It uses `main.c` + `kernels.hip` + `gpu.h` (**same C API as `gpu-cuda/gpu.h`**) and requires **ROCm (`hipcc`)**, an **AMD GPU driver**, and a **physical GPU**. **hipBLAS is not required** (linear layers use custom Q1_0×Q8_0 HIP kernels). **There is no NVFP4 path** (same algorithm family as **`gpu-cuda` with `make run.no-fp4`**).
+
+It exists so the author could **try the same forward on AMD GPUs**. First-time readers can **ignore it**. See **`doc/design.md`** (“Build and run (GPU ROCm)”, “Runtime behavior (`gpu-rocm`)”) for the full spec.
+
+### Directory layout
+
+```text
+bonsai-8b/gpu-rocm/
+├── Makefile
+├── main.c
+├── kernels.hip
+└── gpu.h          # same API as gpu-cuda/gpu.h
+```
+
+### Technical overview
+
+Same GGUF and CLI as **`cpu-blas`** / **non-FP4 `gpu-cuda`**: **batched prefill** + **sequential decode** via **`gpu_forward_prefill`** / **`gpu_forward`**. The host handles GGUF mmap, the tokenizer, and sampling; the device runs **Flash Attention** (K/V shared staging, **`FA_BR`** tiles) and **Q8_0 activations + Q1_0 GEMV**. VRAM layout matches the CUDA appendix in spirit (HIP / **`hipMalloc`** instead of CUDA).
+
+### Requirements
+
+- **ROCm** (default **`/opt/rocm`**, **`hipcc`** and **`rocminfo`**)
+- **AMD GPU driver**
+- Host: **`g++`** and **`libstdc++-dev`** (`hipcc` needs GCC’s C++ headers/libs)
+
+No PyTorch, hipBLAS, etc.
+
+### Build
+
+| Goal | Command (`bonsai-8b/gpu-rocm/`) |
+|---|---|
+| Build and run (default) | `make` / `make run` |
+| Build only | `make build` |
+| Show detected ISA | `make detect-gpu-arch` |
+
+**`GPU_ARCH`** (e.g. `gfx1100`) is auto-detected from **`rocminfo`**. If detection fails, set it explicitly: `make GPU_ARCH=gfx1100 build`. A successful build prints **Detected GPU arch**.
+
+```bash
+cd bonsai-8b/gpu-rocm
+make run
+```
+
+From `bonsai-8b/`: `make build.gpu-rocm` / `make run.gpu-rocm`.
+
+**`FA_BR`**: defaults to **32** (gfx11/gfx12). On GPUs with more shared memory, `make FA_BR=64 build` may work.
+
+### Run
+
+```bash
+cd bonsai-8b/gpu-rocm
+./bonsai-gpu-rocm ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+```bash
+cd bonsai-8b
+make run.gpu-rocm PROMPT="Hello"
+```
+
+CLI flags (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
+
+### Reference benchmark (GPU ROCm)
+
+**No reference tok/s table is checked in yet.** When measuring, use the same command as the CUDA appendix (`-p "Hello" -n 16 -t 0`) and read **`Prefill complete` / `Decode complete`** on stderr.
+
+### Troubleshooting (ROCm build)
+
+**Empty `GPU_ARCH` / build failure:** confirm the GPU appears in `rocminfo`, then try `make GPU_ARCH=gfx1100 build`. **C++ headers not found:** `sudo apt install -y g++ libstdc++-dev`. **ROCm path:** `make ROCM=/opt/rocm build`.
+
+### Source files to read
+
+10. `bonsai-8b/gpu-rocm/main.c` — host side (same role as `gpu-cuda/main.c`)  
+11. `bonsai-8b/gpu-rocm/kernels.hip` — HIP kernels and VRAM management  
+12. `bonsai-8b/gpu-rocm/gpu.h` — C API (identical to `gpu-cuda`)  

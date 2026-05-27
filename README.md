@@ -59,12 +59,14 @@
     ├── cpu-omp/
     │   ├── Makefile
     │   └── main.c
-    └── cpu-blas/
-        ├── Makefile
-        └── main.c
+    ├── cpu-blas/
+    │   ├── Makefile
+    │   └── main.c
+    ├── gpu-cuda/          # 付録（README 末尾）
+    └── gpu-rocm/          # 付録（README 末尾）
 ```
 
-推論コードは **`bonsai-8b/cpu/`**（参照・単スレッド）が基準です。並列版は **`bonsai-8b/cpu-omp/`**、CPU 最適化版は **`bonsai-8b/cpu-blas/`** です。
+推論コードは **`bonsai-8b/cpu/`**（参照・単スレッド）が基準です。並列版は **`bonsai-8b/cpu-omp/`**、CPU 最適化版は **`bonsai-8b/cpu-blas/`** です。GPU 向けは **`gpu-cuda`**（NVIDIA）と **`gpu-rocm`**（AMD）が付録としてあります（本文末尾）。
 
 ## 初心者向け: LLM推論で何が起きるか
 
@@ -219,7 +221,7 @@ cd bonsai-8b/cpu-blas
 make build
 ```
 
-成功すると **`bonsai-cpu-blas`** がこのディレクトリにできます。`bonsai-8b/Makefile` からは `make build.cpu-blas` / `make run.cpu-blas` でもビルド・実行できます。
+成功すると **`bonsai-cpu-blas`** がこのディレクトリにできます（ビルド時に **`SIMD flags:`** が表示されます。**`/proc/cpuinfo`** から **`-mavx2`**（FMA ありなら **`-mfma`**）等を自動選択。上書き: `make build ARCH_FLAGS='-mavx2 -mfma'`）。`bonsai-8b/Makefile` からは `make build.cpu-blas` / `make run.cpu-blas` でもビルド・実行できます。
 
 ### 実行
 
@@ -252,7 +254,7 @@ make run.cpu-blas PROMPT="Hello"
 |---|---:|---:|---|
 | `cpu/bonsai-cpu` | 66.8 s | **0.24 tok/s** | 単スレッド、`-O3`（`cpu/Makefile` 既定） |
 | `cpu-omp/bonsai-cpu-omp` | 3.2 s | **4.94 tok/s** | `-O3 -fopenmp`（`cpu-omp/Makefile` 既定） |
-| `cpu-blas/bonsai-cpu-blas` | 0.5 s | **30.79 tok/s** | `-O3 -fopenmp -march=native -ffast-math -mfma`、OpenBLAS 1 スレッド |
+| `cpu-blas/bonsai-cpu-blas` | 0.5 s | **30.79 tok/s** | `-O3 -fopenmp -ffast-math`、`ARCH_FLAGS` は cpuinfo 自動（5950X 時 `-mavx2 -mfma`）、OpenBLAS 1 スレッド |
 
 この条件下では **`cpu-blas` が `cpu-omp` の約 6 倍**、**`cpu` の約 128 倍**の decode スループットでした（`cpu-omp` は `cpu` の約 21 倍）。生成テキスト（`Hello! I'm Bonsai, an AI assistant developed by PrismML.`）は 3 バイナリで一致しています。
 
@@ -300,7 +302,7 @@ cd bonsai-8b
 make clean
 ```
 
-ルートで `make clean` すると **`cpu/bonsai-cpu`** と **`cpu-blas/bonsai-cpu-blas`** が削除されます。**`cpu-omp/bonsai-cpu-omp`** を消すときは `bonsai-8b/cpu-omp` で `make clean` してください。GGUF は削除されません。
+ルートで `make clean` すると **`cpu/bonsai-cpu`**、**`cpu-blas/bonsai-cpu-blas`**、付録の **`gpu-cuda/bonsai-gpu-cuda`** と **`gpu-rocm/bonsai-gpu-rocm`** も削除されます。**`cpu-omp/bonsai-cpu-omp`** を消すときは `bonsai-8b/cpu-omp` で `make clean` してください。GGUF は削除されません。
 
 ## よくあるトラブル
 
@@ -344,8 +346,8 @@ cd bonsai-8b && make model
 ## このリポジトリで扱わないもの
 
 - 学習・ファインチューニング  
-- **ROCm/HIP・AMD NPU** や **Vulkan / Metal** など **GPU 向けその他のランタイム**  
-- バッチ推論の最適化  
+- **AMD NPU（XDNA2 等）** や **Vulkan / Metal** など（**`gpu-cuda`** / **`gpu-rocm`** は付録の参考実装。本文の主眼は CPU 3 バリアント）  
+- バッチ推論の最適化（GPU 付録の prefill バッチは decode 高速化用）  
 - 画像入力  
 - サーバ化・Web API 化  
 - すべての GGUF 量子化形式への汎用対応  
@@ -358,7 +360,7 @@ cd bonsai-8b && make model
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-困ったときは、`bonsai-8b/Makefile`（`model` / `build.cpu` / `build.cpu-blas` / `run.cpu-blas` / `build.gpu-cuda` / `build.blackwell` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。
+困ったときは、`bonsai-8b/Makefile`（`model` / `build.cpu` / `build.cpu-blas` / `run.cpu-blas` / `build.gpu-cuda` / `build.gpu-rocm` / `build.blackwell` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。
 
 ---
 
@@ -628,7 +630,7 @@ PTX **`compute_86`** + ドライバ JIT、Q1_0 GEMV（FP4 パスなし）。`gpu
 
 **CUDA / `nvcc` が見つからない:** CUDA Toolkit（**`nvcc`**）と NVIDIA ドライバをインストールし、`gpu-cuda` で `make build` を再実行してください。古い CUDA では `-arch=native` が使えないため、既定は PTX（`compute_86`）+ ドライバ JIT です。GPU に合わせ `CUDA_GENCODE` を指定してください（`gpu-cuda/Makefile` 参照）。プロンプトが `[prompt length … exceeds max_seq …]` で止まる場合は **`-l`** を大きくしてください。
 
-**片付け:** ルートで `make clean` すると **`gpu-cuda/bonsai-gpu-cuda`** も削除されます。
+**片付け:** ルートで `make clean` すると **`gpu-cuda/bonsai-gpu-cuda`** と **`gpu-rocm/bonsai-gpu-rocm`** も削除されます。
 
 ### ソースを読む場合
 
@@ -636,3 +638,80 @@ PTX **`compute_86`** + ドライバ JIT、Q1_0 GEMV（FP4 パスなし）。`gpu
 7. `bonsai-8b/gpu-cuda/kernels.cu` — forward 本体・`gpu_mm*` のディスパッチ（FP4 時は `fp4_bonsai` へ）  
 8. `bonsai-8b/gpu-cuda/fp4_bonsai.cu` / `fp4_gemm.cu` — Q1_0 ↔ NVFP4 ブリッジと CUTLASS GEMM（`BONSAI_FP4=1` 時）  
 9. `bonsai-8b/gpu-cuda/gpu.h` — C API（`gpu_forward_prefill` 等）  
+
+---
+
+## AMD ROCm / HIP 実装（`gpu-rocm`）について
+
+**`bonsai-8b/gpu-rocm/` も本リポジトリの目的（単一 C ソース・依存最小）から外れた付録**です。`main.c` + `kernels.hip` + `gpu.h`（**`gpu-cuda/gpu.h` と同一 C API**）に分かれ、**ROCm（`hipcc`）・AMD GPU ドライバ・実機**が必要です。**hipBLAS 不要**（線形層は Q1_0×Q8_0 のカスタム HIP カーネル）。**NVFP4 経路はありません**（アルゴリズムは **`gpu-cuda` の `make run.no-fp4`** と同系）。
+
+筆者が **AMD GPU 上でも同じ forward を試す**ための実験用コードです。初めて読む方は無視して構いません。詳細仕様は **`doc/design.md`** の「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」を参照してください。
+
+### ディレクトリ構成
+
+```text
+bonsai-8b/gpu-rocm/
+├── Makefile
+├── main.c
+├── kernels.hip
+└── gpu.h          # gpu-cuda/gpu.h と同一 API
+```
+
+### 技術的な概要
+
+`cpu-blas` / **`gpu-cuda`（FP4 なし）** と同じ GGUF・CLI・**prefill バッチ + decode 逐次**（**`gpu_forward_prefill`** / **`gpu_forward`**）。ホストは GGUF mmap・トークナイザ・サンプリング、デバイスは **Flash Attention**（K/V shared staging、**`FA_BR`** タイル）と **Q8_0 活性化 + Q1_0 GEMV**。VRAM 配置の考え方は上記 CUDA 付録の表と同趣旨（API は **HIP** / **`hipMalloc`**）。
+
+### 必要なもの
+
+- **ROCm**（既定 **`/opt/rocm`**、**`hipcc`**・**`rocminfo`**）
+- **AMD GPU ドライバ**
+- ホスト: **`g++`** と **`libstdc++-dev`**（`hipcc` が C++ 標準ライブラリを参照するため）
+
+PyTorch・hipBLAS 等は不要です。
+
+### ビルド
+
+| 目的 | コマンド（`bonsai-8b/gpu-rocm/`） |
+|---|---|
+| ビルド＋実行（既定） | `make` / `make run` |
+| ビルドのみ | `make build` |
+| GPU ISA 確認 | `make detect-gpu-arch` |
+
+**`GPU_ARCH`**（例: `gfx1100`）は **`rocminfo`** から自動検出されます。未検出時は `make GPU_ARCH=gfx1100 build` のように明示してください。ビルド成功時に **Detected GPU arch** が表示されます。
+
+```bash
+cd bonsai-8b/gpu-rocm
+make run
+```
+
+`bonsai-8b/Makefile` から: `make build.gpu-rocm` / `make run.gpu-rocm`。
+
+**`FA_BR`**: 既定 **32**（gfx11/gfx12 向け）。shared に余裕がある GPU では `make FA_BR=64 build` も可。
+
+### 実行
+
+```bash
+cd bonsai-8b/gpu-rocm
+./bonsai-gpu-rocm ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
+```
+
+```bash
+cd bonsai-8b
+make run.gpu-rocm PROMPT="Hello"
+```
+
+CLI オプション（`-p`、`-n`、`-t`、`-k`、`-s`、`-l`）は CPU 版と同様です。
+
+### 参考ベンチマーク（GPU ROCm）
+
+本リポジトリでは **参考 tok/s は未計測**です。計測するときは CUDA 付録と同じコマンド（`-p "Hello" -n 16 -t 0`）と stderr の **`Prefill complete` / `Decode complete`** 行を使ってください。
+
+### よくあるトラブル（ROCm 版）
+
+**`GPU_ARCH` が空 / ビルド失敗:** `rocminfo` で GPU が見えるか確認し、`make GPU_ARCH=gfx1100 build` を試してください。**C++ headers not found:** `sudo apt install -y g++ libstdc++-dev`。**ROCm のパス:** `make ROCM=/opt/rocm build` で上書きできます。
+
+### ソースを読む場合
+
+10. `bonsai-8b/gpu-rocm/main.c` — ホスト側（`gpu-cuda/main.c` と同趣旨）  
+11. `bonsai-8b/gpu-rocm/kernels.hip` — HIP カーネル・VRAM 管理  
+12. `bonsai-8b/gpu-rocm/gpu.h` — C API（`gpu-cuda` と同一）  
