@@ -1107,11 +1107,23 @@ void gpu_copy_logits(GpuModel *gm, float *host_logits)
 
 void gpu_print_device_info(void)
 {
+    char desc[256];
+    gpu_get_device_desc(desc, sizeof desc);
+    printf("GPU: %s\n", desc);
+}
+
+void gpu_get_device_desc(char *buf, size_t cap)
+{
+    if (!buf || cap == 0) return;
+    buf[0] = '\0';
     int dev = 0;
-    HIP_CHECK(hipGetDevice(&dev));
     hipDeviceProp_t prop;
-    HIP_CHECK(hipGetDeviceProperties(&prop, dev));
-    printf("GPU: %s (compute %d.%d, %.1f GB)\n",
-           prop.name, prop.major, prop.minor,
-           (double)prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0));
+    if (hipGetDevice(&dev) != hipSuccess ||
+        hipGetDeviceProperties(&prop, dev) != hipSuccess) {
+        snprintf(buf, cap, "unknown");
+        return;
+    }
+    snprintf(buf, cap, "%s (compute %d.%d, %.1f GB)",
+             prop.name, prop.major, prop.minor,
+             (double)prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0));
 }

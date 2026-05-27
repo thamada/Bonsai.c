@@ -4,6 +4,20 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-27 17:30:18
+
+**`bonsai-8b/gpu-rocm/Makefile`**: **`log`** / **`log.push`** ターゲットを追加。**`BENCH_PROMPT`**（長文・ChatML 後 ~130 トークン）、**`BENCH_N=128`**、**`BENCH_SEED`**、**`BENCH_LOG_FILE`**（既定 **`/tmp/benchmark.log`**）。**`log.push`** は推論実行後にログを解析し **`BENCH_LOG += ISO8601|GPU_ARCH|hostname|…`** を **`Makefile` に追記**（推論のみの tok/s、重み H2D 除外）。gfx1201 実測 2 件を記録。
+
+**`bonsai-8b/gpu-rocm/main.c`**: 終了時 **`write_benchmark_log`**（key=value + プロンプト／生成全文）。**`generate()`** のスループットは **`gpu_model_create` 後**の prefill/decode のみ計測。生成テキスト保持用 **`GenBuf`**。
+
+**`bonsai-8b/gpu-rocm/kernels.hip`**: **`gpu_get_device_desc`** を追加（**`gpu_print_device_info`** から分離）。
+
+**`bonsai-8b/gpu-rocm/gpu.h`**: **`gpu_get_device_desc`** API を追加。
+
+**`doc/design.md`**: GPU ROCm 参考ベンチマーク表（gfx1201・**`make log.push`** 手順）、**`log`/`log.push`**・ベンチログ形式・制約を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-27 17:20:00
 
 **`README.md` / `README.en.md`**: ディレクトリツリーに **`gpu-cuda`** / **`gpu-rocm`** を追加。**`cpu-blas`** の **`ARCH_FLAGS`**（cpuinfo 自動検出）とベンチマーク備考を更新（旧 **`-march=native`** 表記を削除）。**`make clean`**・**`bonsai-8b/Makefile`** 案内に **`gpu-rocm`** を追加。「扱わないもの」から ROCm/HIP を外し **AMD NPU** 等に整理（GPU 付録は参考実装と明記）。**付録「AMD ROCm / HIP 実装（`gpu-rocm`）」** を新設（ビルド・実行・要件・トラブルシュート・ソース案内。ベンチマーク未収録）。

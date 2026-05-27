@@ -643,7 +643,7 @@ With the same prompt and `-t 0`, **both configurations** matched **`cpu-blas`** 
 
 ## AMD ROCm / HIP implementation (`gpu-rocm`)
 
-**`bonsai-8b/gpu-rocm/` is also an appendix outside this repo’s main goals** (single C source, minimal dependencies). It uses `main.c` + `kernels.hip` + `gpu.h` (**same C API as `gpu-cuda/gpu.h`**) and requires **ROCm (`hipcc`)**, an **AMD GPU driver**, and a **physical GPU**. **hipBLAS is not required** (linear layers use custom Q1_0×Q8_0 HIP kernels). **There is no NVFP4 path** (same algorithm family as **`gpu-cuda` with `make run.no-fp4`**).
+**`bonsai-8b/gpu-rocm/` is also an appendix outside this repo’s main goals** (single C source, minimal dependencies). It uses `main.c` + `kernels.hip` + `gpu.h` (**C API based on `gpu-cuda/gpu.h` with `gpu_get_device_desc` added**) and requires **ROCm (`hipcc`)**, an **AMD GPU driver**, and a **physical GPU**. **hipBLAS is not required** (linear layers use custom Q1_0×Q8_0 HIP kernels). **There is no NVFP4 path** (same algorithm family as **`gpu-cuda` with `make run.no-fp4`**). Use **`make log` / `make log.push`** to record benchmark history in **`gpu-rocm/Makefile`**.
 
 It exists so the author could **try the same forward on AMD GPUs**. First-time readers can **ignore it**. See **`doc/design.md`** (“Build and run (GPU ROCm)”, “Runtime behavior (`gpu-rocm`)”) for the full spec.
 
@@ -654,12 +654,14 @@ bonsai-8b/gpu-rocm/
 ├── Makefile
 ├── main.c
 ├── kernels.hip
-└── gpu.h          # same API as gpu-cuda/gpu.h
+└── gpu.h          # based on gpu-cuda (adds gpu_get_device_desc)
 ```
 
 ### Technical overview
 
 Same GGUF and CLI as **`cpu-blas`** / **non-FP4 `gpu-cuda`**: **batched prefill** + **sequential decode** via **`gpu_forward_prefill`** / **`gpu_forward`**. The host handles GGUF mmap, the tokenizer, and sampling; the device runs **Flash Attention** (K/V shared staging, **`FA_BR`** tiles) and **Q8_0 activations + Q1_0 GEMV**. VRAM layout matches the CUDA appendix in spirit (HIP / **`hipMalloc`** instead of CUDA).
+
+On exit, a key=value benchmark log is written to **`BENCH_LOG_FILE`** (default **`/tmp/benchmark.log`**). stderr prefill/decode/total tok/s cover **`generate()` only**—**after** weight H2D in **`gpu_model_create`**.
 
 ### Requirements
 
@@ -676,6 +678,8 @@ No PyTorch, hipBLAS, etc.
 | Build and run (default) | `make` / `make run` |
 | Build only | `make build` |
 | Show detected ISA | `make detect-gpu-arch` |
+| Show benchmark history | `make log` |
+| Run benchmark and append history | `make log.push` (e.g. `make log.push BENCH_N=64`) |
 
 **`GPU_ARCH`** (e.g. `gfx1100`) is auto-detected from **`rocminfo`**. If detection fails, set it explicitly: `make GPU_ARCH=gfx1100 build`. A successful build prints **Detected GPU arch**.
 
@@ -702,16 +706,56 @@ make run.gpu-rocm PROMPT="Hello"
 
 CLI flags (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
 
+### Benchmark logging (`make log` / `make log.push`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BENCH_PROMPT` | Long English text (in Makefile) | Prompt with **~130 tokens** after ChatML encoding |
+| `BENCH_N` | `128` | Max new tokens (`-n`) |
+| `BENCH_SEED` | `42` | RNG seed (`-s`) |
+| `BENCH_LOG_FILE` | `/tmp/benchmark.log` | key=value log written after the run |
+
+```bash
+cd bonsai-8b/gpu-rocm
+make log.push          # build → benchmark run → parse log → append one line to Makefile
+make log               # print BENCH_LOG entries as a table
+```
+
+**`log.push` workflow:**
+
+1. Run **`bonsai-gpu-rocm`** with **`BENCH_PROMPT`**, **`-n BENCH_N`**, **`-t 0`**, **`-s BENCH_SEED`**.
+2. On exit, write **`prompt_tokens`**, **`gen_tokens`**, **`prefill_tps`**, **`decode_tps`**, **`total_tps`**, etc. to **`/tmp/benchmark.log`** (or **`BENCH_LOG_FILE`**).
+3. **`log.push`** reads the log and appends one line  
+   **`ISO8601|GPU_ARCH|hostname|prompt|gen|prefill|decode|total`**  
+   before **`# BENCH_LOG_END`** in **`gpu-rocm/Makefile`**.
+
+**Note:** **`make log.push` modifies `gpu-rocm/Makefile`**. Check **`git diff`** before committing. Table **`total_tps`** is **inference only** (weight VRAM upload is excluded).
+
 ### Reference benchmark (GPU ROCm)
 
-**No reference tok/s table is checked in yet.** When measuring, use the same command as the CUDA appendix (`-p "Hello" -n 16 -t 0`) and read **`Prefill complete` / `Decode complete`** on stderr.
+| Item | Value |
+|---|---|
+| GPU | **AMD gfx1201** (ROCm, **`GPU_ARCH`**) |
+| OS | Linux |
+| Model | `Bonsai-8B-Q1_0.gguf` |
+| Workload | Long prompt (**130** tokens after ChatML) + **128** decode tokens (**`make log.push`** defaults: **`-n 128 -t 0 -s 42`**) |
+| Metrics (prefill / decode) | stderr **`Prefill complete` / `Decode complete`** |
+| Metrics (total) | Benchmark log **`total_tps`** (inference window; weight H2D excluded) |
+| Reproduce | In **`bonsai-8b/gpu-rocm/`**: **`make log.push`** then **`make log`** |
+
+| Timestamp | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
+|---|---:|---:|---:|---|
+| 2026-05-27 17:21 | **175.03** | **41.89** | **67.92** | gfx1201, 130+128 tokens |
+| 2026-05-27 17:29 | **174.18** | **42.06** | **68.08** | Same setup (2nd run) |
+
+Do **not** compare these numbers directly to the **CPU table** (`-p "Hello" -n 16`) or the **CUDA appendix** (prefill 18 + decode 16)—prompt length and token counts differ. For short prompts, run `./bonsai-gpu-rocm ... -p "Hello" -n 16 -t 0` manually and read stderr **`--- throughput ---`**.
 
 ### Troubleshooting (ROCm build)
 
-**Empty `GPU_ARCH` / build failure:** confirm the GPU appears in `rocminfo`, then try `make GPU_ARCH=gfx1100 build`. **C++ headers not found:** `sudo apt install -y g++ libstdc++-dev`. **ROCm path:** `make ROCM=/opt/rocm build`.
+**Empty `GPU_ARCH` / build failure:** confirm the GPU appears in `rocminfo`, then try `make GPU_ARCH=gfx1100 build`. **C++ headers not found:** `sudo apt install -y g++ libstdc++-dev`. **ROCm path:** `make ROCM=/opt/rocm build`. **Model missing for `log.push`:** run **`make model`** from the parent **`bonsai-8b/`** directory first.
 
 ### Source files to read
 
-10. `bonsai-8b/gpu-rocm/main.c` — host side (same role as `gpu-cuda/main.c`)  
-11. `bonsai-8b/gpu-rocm/kernels.hip` — HIP kernels and VRAM management  
-12. `bonsai-8b/gpu-rocm/gpu.h` — C API (identical to `gpu-cuda`)  
+10. `bonsai-8b/gpu-rocm/main.c` — host side (`generate`, **`write_benchmark_log`**)  
+11. `bonsai-8b/gpu-rocm/kernels.hip` — HIP kernels, VRAM, **`gpu_get_device_desc`**  
+12. `bonsai-8b/gpu-rocm/gpu.h` — C API (**`gpu_get_device_desc`** added)  
