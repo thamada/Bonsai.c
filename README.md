@@ -50,7 +50,7 @@
 │   ├── ChangeLog
 │   └── design.md
 └── bonsai-8b/
-    ├── Makefile
+    ├── Makefile              # make model のみ（GGUF 取得・checksum）
     ├── gguf.txt
     ├── Bonsai-8B-Q1_0.gguf.sha256sum
     ├── cpu/
@@ -86,8 +86,8 @@
 - `libm`  
 - **`cpu-omp`** をビルドするときは **OpenMP に対応したコンパイラ**（GCC / Clang と通常同梱の OpenMP ランタイム、`libgomp` または `libomp`）  
 - **`cpu-blas`** をビルドするときは上記に加え **OpenBLAS**（例: Debian/Ubuntu では `libopenblas-dev`）  
-- **`wget`**（`make model` で GGUF を取得するとき）  
-- **Bonsai-8B-Q1_0.gguf**（[prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)。`make model` で取得）
+- **`wget`**（`make model` で GGUF を**初回**取得するとき）  
+- **Bonsai-8B-Q1_0.gguf**（[prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf)。`bonsai-8b/` で `make model`）
 
 ```bash
 sudo apt update
@@ -98,9 +98,9 @@ sudo apt install -y build-essential make
 
 ## モデルファイルを置く
 
-`bonsai-8b/Makefile` の既定は **`MODEL=Bonsai-8B-Q1_0.gguf`** です。別パスを使うときは実行時に渡すか `make run.cpu MODEL=...` で指定してください。
+`bonsai-8b/Makefile` は **`model` ターゲットのみ**（GGUF 取得と SHA256 検証。`make` だけでも同じ）。既定は **`MODEL=Bonsai-8B-Q1_0.gguf`** です。ビルド・実行時のモデルパスは各サブディレクトリの Makefile で指定します（例: `cd cpu && make run MODEL=/data/models/Bonsai-8B-Q1_0.gguf`）。
 
-GGUF 本体はリポジトリに含めません。`bonsai-8b/gguf.txt` の URL から **`make model`** でダウンロードし、`bonsai-8b/` 直下に置きます。ダウンロード後は **`Bonsai-8B-Q1_0.gguf.sha256sum`** で SHA256 を自動検証します（失敗時は破損ファイルを削除）。
+GGUF 本体はリポジトリに含めません。`bonsai-8b/gguf.txt` の URL から **`make model`** でダウンロードし、`bonsai-8b/` 直下に置きます。**既にファイルがある場合は再ダウンロードせず、`Bonsai-8B-Q1_0.gguf.sha256sum` による SHA256 検証のみ**行います（失敗時は破損ファイルを削除）。
 
 ```bash
 cd bonsai-8b
@@ -127,15 +127,15 @@ bonsai-8b/
 └── Bonsai-8B-Q1_0.gguf
 ```
 
-整合性は **`make model`** が **`Bonsai-8B-Q1_0.gguf.sha256sum`** で検証します。[Hugging Face](https://huggingface.co/prism-ml/Bonsai-8B-gguf/tree/main) 上のハッシュとも一致するはずです。
+整合性は **`make model`** が **`Bonsai-8B-Q1_0.gguf.sha256sum`** で検証します（既存ファイルでも毎回 checksum を確認）。[Hugging Face](https://huggingface.co/prism-ml/Bonsai-8B-gguf/tree/main) 上のハッシュとも一致するはずです。
 
 ## いちばん簡単な実行手順
 
 ```bash
 cd bonsai-8b
 make model
-make build.cpu
-./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
+cd cpu && make build
+./bonsai-cpu ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
 
 任意で OpenMP 版（別ディレクトリでビルド）:
@@ -151,28 +151,31 @@ make build
 ### ビルド
 
 ```bash
-cd bonsai-8b
-make build.cpu
+cd bonsai-8b/cpu
+make build
 ```
 
-成功すると **`cpu/bonsai-cpu`** ができます。
+成功すると **`bonsai-cpu`** がこのディレクトリにできます。
 
 ### 実行
 
 ```bash
-./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "日本語で短く自己紹介してください。" -n 16
+cd bonsai-8b/cpu
+./bonsai-cpu ../Bonsai-8B-Q1_0.gguf -p "日本語で短く自己紹介してください。" -n 16
 ```
 
-`Makefile` の **`run.cpu`**:
+`Makefile` の **`run`**:
 
 ```bash
-make run.cpu PROMPT="日本語で短く自己紹介してください。"
+cd bonsai-8b/cpu
+make run PROMPT="日本語で短く自己紹介してください。"
 ```
 
 別ディレクトリのモデル:
 
 ```bash
-make run.cpu MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
+cd bonsai-8b/cpu
+make run MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
 ```
 
 ## CPU OpenMP 版（`cpu-omp`）
@@ -221,7 +224,7 @@ cd bonsai-8b/cpu-blas
 make build
 ```
 
-成功すると **`bonsai-cpu-blas`** がこのディレクトリにできます（ビルド時に **`SIMD flags:`** が表示されます。**`/proc/cpuinfo`** から **`-mavx2`**（FMA ありなら **`-mfma`**）等を自動選択。上書き: `make build ARCH_FLAGS='-mavx2 -mfma'`）。`bonsai-8b/Makefile` からは `make build.cpu-blas` / `make run.cpu-blas` でもビルド・実行できます。
+成功すると **`bonsai-cpu-blas`** がこのディレクトリにできます（ビルド時に **`SIMD flags:`** が表示されます。**`/proc/cpuinfo`** から **`-mavx2`**（FMA ありなら **`-mfma`**）等を自動選択。上書き: `make build ARCH_FLAGS='-mavx2 -mfma'`）。
 
 ### 実行
 
@@ -231,8 +234,8 @@ cd bonsai-8b/cpu-blas
 ```
 
 ```bash
-cd bonsai-8b
-make run.cpu-blas PROMPT="Hello"
+cd bonsai-8b/cpu-blas
+make run PROMPT="Hello"
 ```
 
 ## 参考ベンチマーク
@@ -297,12 +300,16 @@ OpenBLAS 版も同様です。
 
 ## 片付け
 
-```bash
-cd bonsai-8b
-make clean
-```
+各サブディレクトリで `make clean` します。GGUF は削除されません。
 
-ルートで `make clean` すると **`cpu/bonsai-cpu`**、**`cpu-blas/bonsai-cpu-blas`**、付録の **`gpu-cuda/bonsai-gpu-cuda`** と **`gpu-rocm/bonsai-gpu-rocm`** も削除されます。**`cpu-omp/bonsai-cpu-omp`** を消すときは `bonsai-8b/cpu-omp` で `make clean` してください。GGUF は削除されません。
+```bash
+cd bonsai-8b/cpu && make clean
+cd bonsai-8b/cpu-omp && make clean
+cd bonsai-8b/cpu-blas && make clean
+# 付録 GPU:
+cd bonsai-8b/gpu-cuda && make clean
+cd bonsai-8b/gpu-rocm && make clean
+```
 
 ## よくあるトラブル
 
@@ -360,7 +367,7 @@ cd bonsai-8b && make model
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-困ったときは、`bonsai-8b/Makefile`（`model` / `build.cpu` / `build.cpu-blas` / `run.cpu-blas` / `build.gpu-cuda` / `build.gpu-rocm` / `build.blackwell` など）と各サブディレクトリの Makefile、および実行時のモデルパスを確認してください。
+困ったときは、`bonsai-8b/Makefile`（**`model` のみ**）と各サブディレクトリの Makefile（`cpu/`、`cpu-blas/`、`gpu-cuda/` 等）、および実行時のモデルパスを確認してください。
 
 ---
 
@@ -571,7 +578,7 @@ make build          # または make run.no-fp4 用
 # make run          # Blackwell + NVFP4（既定ターゲット）
 ```
 
-成功すると **`bonsai-gpu-cuda`** がこのディレクトリにできます。`bonsai-8b/Makefile` からは `make build.gpu-cuda` / `make run.gpu-cuda`（PTX・FP4 なし）でもビルド・実行できます。
+成功すると **`bonsai-gpu-cuda`** がこのディレクトリにできます。
 
 GPU アーキテクチャに合わせ **`CUDA_GENCODE`** を上書きできます（`make run.no-fp4` の既定は PTX `compute_86` + ドライバ JIT）:
 
@@ -583,12 +590,7 @@ make build CUDA_GENCODE=arch=compute_90,code=sm_90
 
 ```bash
 cd bonsai-8b/gpu-cuda
-./bonsai-gpu-cuda ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
-```
-
-```bash
-cd bonsai-8b
-make run.gpu-cuda PROMPT="Hello"
+make run PROMPT="Hello"          # または make run.no-fp4 PROMPT="Hello"
 ```
 
 CLI オプション（`-p`、`-n`、`-t`、`-k`、`-s`、`-l`）は CPU 版と同様です。
@@ -630,7 +632,7 @@ PTX **`compute_86`** + ドライバ JIT、Q1_0 GEMV（FP4 パスなし）。`gpu
 
 **CUDA / `nvcc` が見つからない:** CUDA Toolkit（**`nvcc`**）と NVIDIA ドライバをインストールし、`gpu-cuda` で `make build` を再実行してください。古い CUDA では `-arch=native` が使えないため、既定は PTX（`compute_86`）+ ドライバ JIT です。GPU に合わせ `CUDA_GENCODE` を指定してください（`gpu-cuda/Makefile` 参照）。プロンプトが `[prompt length … exceeds max_seq …]` で止まる場合は **`-l`** を大きくしてください。
 
-**片付け:** ルートで `make clean` すると **`gpu-cuda/bonsai-gpu-cuda`** と **`gpu-rocm/bonsai-gpu-rocm`** も削除されます。
+**片付け:** `bonsai-8b/gpu-cuda` または `bonsai-8b/gpu-rocm` で `make clean` してください。
 
 ### ソースを読む場合
 
@@ -688,8 +690,6 @@ cd bonsai-8b/gpu-rocm
 make run
 ```
 
-`bonsai-8b/Makefile` から: `make build.gpu-rocm` / `make run.gpu-rocm`。
-
 **`FA_BR`**: 既定 **32**（gfx11/gfx12 向け）。shared に余裕がある GPU では `make FA_BR=64 build` も可。
 
 ### 実行
@@ -700,8 +700,8 @@ cd bonsai-8b/gpu-rocm
 ```
 
 ```bash
-cd bonsai-8b
-make run.gpu-rocm PROMPT="Hello"
+cd bonsai-8b/gpu-rocm
+make run PROMPT="Hello"
 ```
 
 CLI オプション（`-p`、`-n`、`-t`、`-k`、`-s`、`-l`）は CPU 版と同様です。

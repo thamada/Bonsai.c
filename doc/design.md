@@ -115,8 +115,8 @@
 | パス | 役割 |
 |------|------|
 | `README.md` / `README.en.md` | **入口（日／英）**。**本文**: CPU 3 バリアントのビルド・実行・ベンチマーク・トラブルシュート（`make model` 含む）。**付録**（`---` 以降）: **`gpu-cuda`**（NVIDIA）と **`gpu-rocm`**（AMD）。**`cpu-blas`** の **`ARCH_FLAGS`**（cpuinfo 自動検出）も記載。 |
-| `bonsai-8b/Makefile` | **`model`**（GGUF ダウンロード＋SHA256 検証）、**`build.cpu`** / **`run.cpu`**、**`build.cpu-blas`** / **`run.cpu-blas`**、**`build.gpu-cuda`** / **`run.gpu-cuda`**、**`build.gpu-rocm`** / **`run.gpu-rocm`**、**`blackwell`** / **`build.blackwell`** / **`run.blackwell`**（**`gpu-cuda`** へ委譲）、**`clean`**（`cpu`・`cpu-blas`・`gpu-cuda`・**`gpu-rocm`** を委譲）。**`cpu-omp` は未集約**（サブディレクトリの Makefile を直接使用）。 |
-| `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`Bonsai-8B-Q1_0.gguf`**。 |
+| `bonsai-8b/Makefile` | **`model` のみ**（GGUF 取得と SHA256 検証）。**`.DEFAULT_GOAL := model`**。ビルド・実行・**`clean`** は各サブディレクトリの Makefile を直接使用（**`cpu/`**・**`cpu-omp/`**・**`cpu-blas/`**・**`gpu-cuda/`**・**`gpu-rocm/`**）。 |
+| `bonsai-8b/cpu/Makefile` | `bonsai-cpu` の生成。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-omp/Makefile` | **`bonsai-cpu-omp`** の生成（`-fopenmp`）。`MODEL` 既定は **`../Bonsai-8B-Q1_0.gguf`**。 |
 | `bonsai-8b/cpu-blas/Makefile` | **`bonsai-cpu-blas`** の生成（`-fopenmp`、OpenBLAS、**`-funroll-loops -ffast-math`**）。**`/proc/cpuinfo`** の `flags` から **AVX2 → `-mavx2`（FMA ありなら `-mfma`）**、AVX のみ → **`-mavx`**、それ以外 → **`-march=x86-64`** を **`ARCH_FLAGS`** に自動設定（上書き: **`make build ARCH_FLAGS='-mavx2 -mfma'`**）。ビルド時に **`SIMD flags:`** を表示。`pkg-config openblas` があれば `-I`/`-L` を自動付与。 |
 | `bonsai-8b/cpu/main.c` | CPU 単スレッド推論の**参照ソース**（アルゴリズムの正として追う）。**単一 `main.c`**（標準 C + `libm` のみ）。 |
@@ -141,38 +141,43 @@
 
 ### Make ターゲット（`bonsai-8b/Makefile`）
 
-| ターゲット | 出力 | ソース |
-|------------|------|--------|
-| `model` | `$(MODEL)`（既定 **`Bonsai-8B-Q1_0.gguf`**） | `gguf.txt` の URL を `resolve/main` に変換して `wget` し、**`$(MODEL).sha256sum`** で `sha256sum --check` |
-| `build.cpu` / `run.cpu` | `cpu/bonsai-cpu` | `cpu/main.c` |
-| `build.cpu-blas` / `run.cpu-blas` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
-| `build.gpu-cuda` / `run.gpu-cuda` | `gpu-cuda/bonsai-gpu-cuda` | `gpu-cuda/main.c` + `gpu-cuda/kernels.cu` |
-| `build.gpu-rocm` / `run.gpu-rocm` | `gpu-rocm/bonsai-gpu-rocm` | `gpu-rocm/main.c` + `gpu-rocm/kernels.hip` |
-| `blackwell` / `build.blackwell` / `run.blackwell` | `gpu-cuda/bonsai-gpu-cuda`（Blackwell 向け **`sm_120a`**、**`FA_BR=32`**） | `gpu-cuda/Makefile` の **`blackwell`**（CUDA 13 セットアップ＋ビルド） |
-
-**`cpu-omp/`** はルート Makefile からは呼ばず、次のようにサブディレクトリでビルドする。
-
-| 場所 | ターゲット | 出力 | ソース |
-|------|------------|------|--------|
-| `bonsai-8b/cpu-omp/Makefile` | `build` / `run` / `clean` | `cpu-omp/bonsai-cpu-omp` | `cpu-omp/main.c` |
-| `bonsai-8b/cpu-blas/Makefile` | `build` / `run` / `clean` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
-| `bonsai-8b/gpu-cuda/Makefile` | **`run`**（既定）/ **`run.no-fp4`** / `build` / `clean` / **`blackwell`** | `gpu-cuda/bonsai-gpu-cuda` | `main.c` + `kernels.cu`（FP4 時 + `fp4_*.cu`） |
-| `bonsai-8b/gpu-rocm/Makefile` | **`run`**（既定）/ `build` / `clean` / **`detect-gpu-arch`** / **`log`** / **`log.push`** | `gpu-rocm/bonsai-gpu-rocm` | `main.c` + `kernels.hip`（**`hipcc -x hip`**） |
+| ターゲット | 出力 | 動作 |
+|------------|------|------|
+| `model`（既定） | `$(MODEL)`（既定 **`Bonsai-8B-Q1_0.gguf`**） | **`$(MODEL)` が既にある** → 再ダウンロードせず **`sha256sum --check`** のみ。**ない** → **`gguf.txt`** の URL を `resolve/main` に変換して **`wget`** 後に検証。失敗時は破損ファイルを削除 |
 
 **`bonsai-8b/Makefile`** 用変数:
 
 | 変数 | 意味 | 既定例 |
 |------|------|--------|
-| `MODEL` | GGUF パス | `Bonsai-8B-Q1_0.gguf` |
-| `PROMPT` | 実行用プロンプト文字列 | `Hello, how are you?` |
+| `MODEL` | GGUF ファイル名（`bonsai-8b/` 直下） | `Bonsai-8B-Q1_0.gguf` |
 
-**`bonsai-8b/cpu-omp/Makefile`** にも `MODEL` / `PROMPT` があり、`MODEL` の既定は **`../Bonsai-8B-Q1_0.gguf`**（`cpu-omp` からの相対パス）。
+### Make ターゲット（サブディレクトリ）
+
+ビルド・実行・**`clean`** は各サブディレクトリの Makefile を使用する。
+
+| 場所 | ターゲット | 出力 | ソース |
+|------|------------|------|--------|
+| `bonsai-8b/cpu/Makefile` | `build` / `run` / `clean` | `cpu/bonsai-cpu` | `cpu/main.c` |
+| `bonsai-8b/cpu-omp/Makefile` | `build` / `run` / `clean` | `cpu-omp/bonsai-cpu-omp` | `cpu-omp/main.c` |
+| `bonsai-8b/cpu-blas/Makefile` | `build` / `run` / `clean` | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
+| `bonsai-8b/gpu-cuda/Makefile` | **`run`**（既定）/ **`run.no-fp4`** / `build` / `clean` / **`blackwell`** | `gpu-cuda/bonsai-gpu-cuda` | `main.c` + `kernels.cu`（FP4 時 + `fp4_*.cu`） |
+| `bonsai-8b/gpu-rocm/Makefile` | **`run`**（既定）/ `build` / `clean` / **`detect-gpu-arch`** / **`log`** / **`log.push`** | `gpu-rocm/bonsai-gpu-rocm` | `main.c` + `kernels.hip`（**`hipcc -x hip`**） |
+
+**各サブディレクトリ Makefile** には **`MODEL`** / **`PROMPT`** があり、`MODEL` の既定は **`../Bonsai-8B-Q1_0.gguf`**（親 **`bonsai-8b/`** の GGUF）。
 
 ```bash
 cd bonsai-8b
-make model
-make build.cpu
-make run.cpu PROMPT="試す文" MODEL=./Bonsai-8B-Q1_0.gguf
+make model              # または make（既定ターゲット）
+make model MODEL=別名.gguf
+```
+
+CPU 単スレッド（`cpu/`）:
+
+```bash
+cd bonsai-8b/cpu
+make build
+make run PROMPT="試す文"
+# または ./bonsai-cpu ../Bonsai-8B-Q1_0.gguf -p "試す文" -n 8
 ```
 
 OpenMP 版（別ディレクトリ）:
@@ -187,19 +192,17 @@ make build
 OpenMP + OpenBLAS 版（推奨）:
 
 ```bash
-cd bonsai-8b
-make build.cpu-blas
-./cpu-blas/bonsai-cpu-blas Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
-# または cpu-blas/ で make build
+cd bonsai-8b/cpu-blas
+make build
+make run PROMPT="Hello"
+# または ./bonsai-cpu-blas ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
 ```
 
 GPU CUDA 版（NVIDIA）:
 
 ```bash
-cd bonsai-8b
-make build.gpu-cuda
-./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
-# または gpu-cuda/ で make build
+cd bonsai-8b/gpu-cuda
+make build              # または make run.no-fp4
 # アーキテクチャ: gpu-cuda/Makefile の CUDA_GENCODE を上書き可能
 ```
 
@@ -209,7 +212,6 @@ Blackwell + NVFP4（RTX 50 系等。CUDA 13 必須）:
 cd bonsai-8b/gpu-cuda
 make run                # 既定: blackwell ビルド後に推論（初回 CUDA 13 導入で sudo のことがある）
 # make blackwell        # ビルドのみ
-# ルートから: make blackwell && make run.blackwell（gpu-cuda の blackwell へ委譲）
 ```
 
 PTX・FP4 なし（汎用 GPU）:
@@ -222,10 +224,8 @@ make run.no-fp4         # または make build
 GPU ROCm 版（AMD）:
 
 ```bash
-cd bonsai-8b
-make build.gpu-rocm
-./gpu-rocm/bonsai-gpu-rocm Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
-# または gpu-rocm/ で make run（既定ターゲット）
+cd bonsai-8b/gpu-rocm
+make run                # 既定ターゲット（ビルド＋実行）
 # GPU_ARCH: rocminfo 自動。手動: make GPU_ARCH=gfx1100 build
 ```
 
@@ -234,9 +234,9 @@ make build.gpu-rocm
 単スレッド:
 
 ```bash
-cd bonsai-8b
-make build.cpu
-./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 8
+cd bonsai-8b/cpu
+make build
+./bonsai-cpu ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 8
 ```
 
 OpenMP:
@@ -279,7 +279,7 @@ make run.no-fp4
 
 **Blackwell の Flash Attention 制約**: **sm_120** 系は静的 shared memory 上限 **48 KB**。PTX 既定 **`FA_BR=64`**（≈65 KB）は Blackwell ネイティブで **`ptxas`** 拒否のため **`make blackwell`** は **`FA_BR=32`**（≈34 KB）を自動指定。手動 FP4 ビルド例: `make build CUDA_GENCODE=arch=compute_120a,code=sm_120a FA_BR=32 BONSAI_FP4=1 NVCC=/usr/local/cuda/bin/nvcc`。
 
-対応 OS: Ubuntu 20.04 / 22.04 / 24.04、Debian 12 / 13。ルート **`bonsai-8b/Makefile`** の **`make blackwell`** / **`make run.blackwell`** は **`gpu-cuda/Makefile`** の **`blackwell`** へ委譲（実行は **`gpu-cuda/` の `make run`** が同等）。
+対応 OS: Ubuntu 20.04 / 22.04 / 24.04、Debian 12 / 13。Blackwell 向けは **`bonsai-8b/gpu-cuda/`** で **`make blackwell`** / **`make run`**（既定）を使用。
 
 ## ビルドと実行（GPU ROCm）
 
@@ -300,8 +300,6 @@ make run
 **要件**: **ROCm**（**`ROCM=/opt/rocm`** 既定、**`$(ROCM)/bin/hipcc`**・**`rocminfo`**）、AMD GPU ドライバ、**`libamdhip64`**。**hipBLAS・PyTorch 等は不要**。ホスト側は **`g++`** と **`libstdc++-dev`**（**`hipcc`** が GCC の C++ ヘッダ／`libstdc++` を参照するため。未検出時はビルド失敗）。**`GPU_ARCH`** 未検出時は **`make GPU_ARCH=gfx1100 build`** 等で明示（**`GPU_ARCH` 空のまま `make` はエラー**）。
 
 **`FA_BR`**: Makefile 既定 **32**（**`-DFA_BR=32`**）。shared 余裕のある GPU では **`make FA_BR=64 build`** 可（**`kernels.hip`** ソース既定は 64、ビルド時マクロが優先）。
-
-ルートから: **`make build.gpu-rocm`** / **`make run.gpu-rocm`**（**`MODEL`** / **`PROMPT`** 変数はルート Makefile 共通）。
 
 **ベンチマークログ（`log.push`）**:
 
@@ -493,9 +491,9 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 ## モデル参照
 
 - 既定ファイル名: **`bonsai-8b/Makefile` の `MODEL`**（既定 **`Bonsai-8B-Q1_0.gguf`**）。
-- 前提: **`wget`**（`make model`）。利用者向けの詳細手順・クイックスタート・トラブルシュートは **`README.md` / `README.en.md`** を参照。
-- 取得 URL: **`bonsai-8b/gguf.txt`**（Hugging Face の `blob/main` URL。`make model` は `resolve/main` に置換して `wget` する）。
-- チェックサム: **`bonsai-8b/$(MODEL).sha256sum`**（既定 **`Bonsai-8B-Q1_0.gguf.sha256sum`**）。`make model` はダウンロード後に **`sha256sum --check`** で照合し、成功・失敗いずれも**英語**のメッセージを表示する。失敗時は破損ファイルを削除する。
+- 前提: **`wget`**（初回ダウンロード時のみ。利用者向けの詳細手順・クイックスタート・トラブルシュートは **`README.md` / `README.en.md`** を参照）。
+- 取得 URL: **`bonsai-8b/gguf.txt`**（Hugging Face の `blob/main` URL。`make model` は **`$(MODEL)` が無いとき** `resolve/main` に置換して `wget` する）。
+- チェックサム: **`bonsai-8b/$(MODEL).sha256sum`**（既定 **`Bonsai-8B-Q1_0.gguf.sha256sum`**）。`make model` は常に **`sha256sum --check`** で照合する（**既存ファイルは再ダウンロードしない**）。成功・失敗いずれも**英語**のメッセージを表示する。失敗時は破損ファイルを削除する。
 - 手動取得: README の手順どおり `gguf.txt` から URL を変換して `wget` し、**`sha256sum --check $(MODEL).sha256sum`** で検証してもよい。
 
 ## 制約・既知の制限

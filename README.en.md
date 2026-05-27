@@ -50,7 +50,7 @@ An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for sm
 │   ├── ChangeLog
 │   └── design.md
 └── bonsai-8b/
-    ├── Makefile
+    ├── Makefile              # make model only (GGUF fetch + checksum)
     ├── gguf.txt
     ├── Bonsai-8B-Q1_0.gguf.sha256sum
     ├── cpu/
@@ -86,8 +86,8 @@ That pipeline is **not** inside PyTorch; you can follow it **in the C source**.
 - `libm`  
 - For **`cpu-omp`**, a compiler/toolchain with **OpenMP** (`libgomp` or `libomp`, commonly bundled with GCC/Clang)  
 - For **`cpu-blas`**, the above plus **OpenBLAS** (e.g. `libopenblas-dev` on Debian/Ubuntu)  
-- **`wget`** (for `make model` to fetch the GGUF)  
-- **`Bonsai-8B-Q1_0.gguf`** from [prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf) (via `make model`)
+- **`wget`** (for **`make model`** on **first** GGUF download)  
+- **`Bonsai-8B-Q1_0.gguf`** from [prism-ml/Bonsai-8B-gguf](https://huggingface.co/prism-ml/Bonsai-8B-gguf) (run **`make model`** from **`bonsai-8b/`**)
 
 ```bash
 sudo apt update
@@ -98,9 +98,9 @@ sudo apt install -y build-essential make
 
 ## Obtain the model file
 
-`bonsai-8b/Makefile` defaults to **`MODEL=Bonsai-8B-Q1_0.gguf`**. Override with a path argument or `make run.cpu MODEL=...` if needed.
+**`bonsai-8b/Makefile`** exposes only the **`model`** target (fetch GGUF and verify SHA256; plain **`make`** does the same). Default **`MODEL=Bonsai-8B-Q1_0.gguf`**. For build/run, set **`MODEL`** / **`PROMPT`** in each subdirectory Makefile (e.g. `cd cpu && make run MODEL=/data/models/Bonsai-8B-Q1_0.gguf`).
 
-The GGUF is **not** in the repo. Run **`make model`** to download from the URL in `bonsai-8b/gguf.txt` and place the file under `bonsai-8b/`. It verifies SHA256 against **`Bonsai-8B-Q1_0.gguf.sha256sum`** after download (removes the file on failure).
+The GGUF is **not** in the repo. Run **`make model`** to download from the URL in `bonsai-8b/gguf.txt` and place the file under `bonsai-8b/`. **If the file already exists, it is not re-downloaded; only SHA256 verification against `Bonsai-8B-Q1_0.gguf.sha256sum` runs** (removes the file on failure).
 
 ```bash
 cd bonsai-8b
@@ -127,15 +127,15 @@ bonsai-8b/
 └── Bonsai-8B-Q1_0.gguf
 ```
 
-Integrity is checked by **`make model`** using **`Bonsai-8B-Q1_0.gguf.sha256sum`**, which should match hashes on [Hugging Face](https://huggingface.co/prism-ml/Bonsai-8B-gguf/tree/main).
+Integrity is checked by **`make model`** using **`Bonsai-8B-Q1_0.gguf.sha256sum`** (checksum runs even when the file already exists), which should match hashes on [Hugging Face](https://huggingface.co/prism-ml/Bonsai-8B-gguf/tree/main).
 
 ## Quick start
 
 ```bash
 cd bonsai-8b
 make model
-make build.cpu
-./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
+cd cpu && make build
+./bonsai-cpu ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 1
 ```
 
 (Optional) OpenMP build from `cpu-omp/`:
@@ -151,30 +151,33 @@ make build
 ### Build
 
 ```bash
-cd bonsai-8b
-make build.cpu
+cd bonsai-8b/cpu
+make build
 ```
 
-Produces **`cpu/bonsai-cpu`**.
+Produces **`bonsai-cpu`** in that directory.
 
 ### Run
 
 ```bash
-./cpu/bonsai-cpu Bonsai-8B-Q1_0.gguf \
+cd bonsai-8b/cpu
+./bonsai-cpu ../Bonsai-8B-Q1_0.gguf \
   -p "Give a one-sentence introduction of yourself." \
   -n 16
 ```
 
-Using the Makefile:
+Using the local Makefile:
 
 ```bash
-make run.cpu PROMPT="Give a one-sentence introduction of yourself."
+cd bonsai-8b/cpu
+make run PROMPT="Give a one-sentence introduction of yourself."
 ```
 
 Model elsewhere:
 
 ```bash
-make run.cpu MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
+cd bonsai-8b/cpu
+make run MODEL=/data/models/Bonsai-8B-Q1_0.gguf PROMPT="Hello"
 ```
 
 ## Build & run (CPU + OpenMP, `cpu-omp`)
@@ -221,7 +224,7 @@ cd bonsai-8b/cpu-blas
 make build
 ```
 
-Produces **`bonsai-cpu-blas`** (the build prints **`SIMD flags:`**—**`/proc/cpuinfo`** selects **`-mavx2`** and **`-mfma`** when available; override with `make build ARCH_FLAGS='-mavx2 -mfma'`). From `bonsai-8b/`: `make build.cpu-blas` / `make run.cpu-blas`.
+Produces **`bonsai-cpu-blas`** (the build prints **`SIMD flags:`**—**`/proc/cpuinfo`** selects **`-mavx2`** and **`-mfma`** when available; override with `make build ARCH_FLAGS='-mavx2 -mfma'`).
 
 ### Run
 
@@ -231,8 +234,8 @@ cd bonsai-8b/cpu-blas
 ```
 
 ```bash
-cd bonsai-8b
-make run.cpu-blas PROMPT="Hello"
+cd bonsai-8b/cpu-blas
+make run PROMPT="Hello"
 ```
 
 ## Reference benchmark
@@ -297,12 +300,16 @@ The OpenBLAS build as well:
 
 ## Clean
 
-```bash
-cd bonsai-8b
-make clean
-```
+Run **`make clean`** in each subdirectory. The GGUF file is **not** deleted.
 
-`make clean` at `bonsai-8b/` removes **`cpu/bonsai-cpu`**, **`cpu-blas/bonsai-cpu-blas`**, and appendix binaries **`gpu-cuda/bonsai-gpu-cuda`** and **`gpu-rocm/bonsai-gpu-rocm`**. To remove **`cpu-omp/bonsai-cpu-omp`**, run `make clean` inside **`bonsai-8b/cpu-omp`**. The GGUF file is **not** deleted.
+```bash
+cd bonsai-8b/cpu && make clean
+cd bonsai-8b/cpu-omp && make clean
+cd bonsai-8b/cpu-blas && make clean
+# Appendix GPU builds:
+cd bonsai-8b/gpu-cuda && make clean
+cd bonsai-8b/gpu-rocm && make clean
+```
 
 ## Troubleshooting
 
@@ -360,7 +367,7 @@ The goal is to **understand, experiment with, and adapt** **Bonsai-8B-Q1_0** (GG
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-If something fails, check **`bonsai-8b/Makefile`** (`model`, `build.cpu`, `build.cpu-blas`, `run.cpu-blas`, `build.gpu-cuda`, `build.gpu-rocm`, `build.blackwell`, …), per-subdir Makefiles, and the model path you pass at runtime.
+If something fails, check **`bonsai-8b/Makefile`** (**`model` only**) and per-subdirectory Makefiles (`cpu/`, `cpu-blas/`, `gpu-cuda/`, etc.), plus the model path you pass at runtime.
 
 ---
 
@@ -571,7 +578,7 @@ make build          # or for make run.no-fp4
 # make run          # Blackwell + NVFP4 (default target)
 ```
 
-Produces **`bonsai-gpu-cuda`**. From `bonsai-8b/`: `make build.gpu-cuda` / `make run.gpu-cuda` (PTX, no FP4) also work.
+Produces **`bonsai-gpu-cuda`**.
 
 Override **`CUDA_GENCODE`** for your GPU (default for `make run.no-fp4`: PTX `compute_86` + driver JIT):
 
@@ -583,12 +590,7 @@ make build CUDA_GENCODE=arch=compute_90,code=sm_90
 
 ```bash
 cd bonsai-8b/gpu-cuda
-./bonsai-gpu-cuda ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 16
-```
-
-```bash
-cd bonsai-8b
-make run.gpu-cuda PROMPT="Hello"
+make run PROMPT="Hello"          # or make run.no-fp4 PROMPT="Hello"
 ```
 
 CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
@@ -630,7 +632,7 @@ With the same prompt and `-t 0`, **both configurations** matched **`cpu-blas`** 
 
 **CUDA / `nvcc` not found:** Install CUDA Toolkit and an NVIDIA driver, then rebuild in **`gpu-cuda`**. Older CUDA may not support `-arch=native`; the default builds PTX (`compute_86`) for driver JIT. Set **`CUDA_GENCODE`** for your GPU (see **`gpu-cuda/Makefile`**). If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
-**Clean:** `make clean` at the repo root also removes **`gpu-cuda/bonsai-gpu-cuda`** and **`gpu-rocm/bonsai-gpu-rocm`**.
+**Clean:** run **`make clean`** in **`bonsai-8b/gpu-cuda`** or **`bonsai-8b/gpu-rocm`**.
 
 ### Source files to read
 
@@ -688,8 +690,6 @@ cd bonsai-8b/gpu-rocm
 make run
 ```
 
-From `bonsai-8b/`: `make build.gpu-rocm` / `make run.gpu-rocm`.
-
 **`FA_BR`**: defaults to **32** (gfx11/gfx12). On GPUs with more shared memory, `make FA_BR=64 build` may work.
 
 ### Run
@@ -700,8 +700,8 @@ cd bonsai-8b/gpu-rocm
 ```
 
 ```bash
-cd bonsai-8b
-make run.gpu-rocm PROMPT="Hello"
+cd bonsai-8b/gpu-rocm
+make run PROMPT="Hello"
 ```
 
 CLI flags (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
