@@ -760,10 +760,18 @@ int fp4_gemm_run_cached(
         return -1;
     }
 
-    // Initialize state (allocates A-side buffers + workspace)
-    if (!g.initialized || g.M != M || g.N != N || g.K != K) {
-        int rc = fp4_gemm_init(M, N, K);
-        if (rc != 0) return rc;
+    if (!g.initialized) {
+        fprintf(stderr, "fp4_gemm_run_cached: not initialized (call fp4_gemm_prealloc first)\n");
+        return -1;
+    }
+    if (M > g.max_M || N > g.max_N || K > g.max_K) {
+        fprintf(stderr, "fp4_gemm_run_cached: M=%d N=%d K=%d exceeds prealloc max_M=%d max_N=%d max_K=%d\n",
+                M, N, K, g.max_M, g.max_N, g.max_K);
+        return -1;
+    }
+    if (!buffers_sufficient(M, N, K)) {
+        fprintf(stderr, "fp4_gemm_run_cached: buffers too small for M=%d N=%d K=%d\n", M, N, K);
+        return -1;
     }
 
     int nsb = K / SF_VEC_SIZE;
@@ -808,6 +816,24 @@ int fp4_gemm_run_cached(
         fprintf(stderr, "fp4_gemm_run_cached: can_implement: %s\n", cutlassGetStatusString(status));
         return -2;
     }
+
+    size_t need_ws = Gemm::get_workspace_size(arguments);
+    if (need_ws > g.workspace_size) {
+        if (g.d_workspace) cudaFree(g.d_workspace);
+        g.d_workspace = nullptr;
+        g.workspace_size = 0;
+        if (need_ws > 0) {
+            cudaError_t err = cudaMalloc(&g.d_workspace, need_ws);
+            if (err != cudaSuccess) {
+                fprintf(stderr, "fp4_gemm_run_cached: workspace alloc %zu: %s\n",
+                        need_ws, cudaGetErrorString(err));
+                return -1;
+            }
+            g.workspace_size = need_ws;
+        }
+    }
+
+    cudaDeviceSynchronize();
 
     status = gemm.initialize(arguments, g.d_workspace);
     if (status != cutlass::Status::kSuccess) {

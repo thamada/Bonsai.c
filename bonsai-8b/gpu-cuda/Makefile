@@ -46,11 +46,14 @@ FP4_CXXFLAGS = -std=c++17 --expt-relaxed-constexpr \
 
 FP4_FLAG :=
 FP4_OBJS :=
-FP4_STAMP := .stamp_bonsai_fp4_$(BONSAI_FP4)
 ifneq ($(BONSAI_FP4),0)
 FP4_FLAG  := -DBONSAI_FP4=1
 FP4_OBJS  := fp4_gemm.o fp4_bonsai.o
 endif
+
+# CUDA_GENCODE / BONSAI_FP4 / FA_BR が変わったら .o を必ず再コンパイル（古い kernels.o 混入防止）
+BUILD_STAMP  := .build_config.stamp
+BUILD_CONFIG := $(CUDA_GENCODE)|fp4=$(BONSAI_FP4)|fa=$(or $(FA_BR),64)
 
 # Blackwell (sm_120) は静的 shared 上限 48 KB。FA_BR=32 で Flash Attention が収まる。
 FA_BR_FLAG :=
@@ -68,16 +71,19 @@ build: main.o kernels.o $(FP4_OBJS)
 main.o: main.c gpu.h
 	$(CC) $(CFLAGS) -c main.c -o main.o
 
-$(FP4_STAMP):
-	@touch $@
+$(BUILD_STAMP): FORCE
+	@printf '%s\n' '$(BUILD_CONFIG)' > $@.new
+	@if ! cmp -s $@.new $@ 2>/dev/null; then mv $@.new $@; else rm -f $@.new; fi
 
-kernels.o: kernels.cu gpu.h fp4_bonsai.h $(FP4_STAMP)
+FORCE:
+
+kernels.o: kernels.cu gpu.h fp4_bonsai.h $(BUILD_STAMP)
 	$(NVCC) $(NVCCFLAGS) $(FA_BR_FLAG) $(FP4_FLAG) -c kernels.cu -o kernels.o
 
-fp4_gemm.o: fp4_gemm.cu fp4_gemm.h | cutlass
+fp4_gemm.o: fp4_gemm.cu fp4_gemm.h $(BUILD_STAMP) | cutlass
 	$(NVCC) $(NVCCFLAGS) $(FP4_CXXFLAGS) -c fp4_gemm.cu -o fp4_gemm.o
 
-fp4_bonsai.o: fp4_bonsai.cu fp4_bonsai.h fp4_gemm.h gpu.h | cutlass
+fp4_bonsai.o: fp4_bonsai.cu fp4_bonsai.h fp4_gemm.h gpu.h $(BUILD_STAMP) | cutlass
 	$(NVCC) $(NVCCFLAGS) $(FP4_CXXFLAGS) -c fp4_bonsai.cu -o fp4_bonsai.o
 
 cutlass:
@@ -92,7 +98,7 @@ run.no-fp4: build
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
 
 clean:
-	rm -f bonsai-gpu-cuda main.o kernels.o fp4_gemm.o fp4_bonsai.o .stamp_bonsai_fp4_*
+	rm -f bonsai-gpu-cuda main.o kernels.o fp4_gemm.o fp4_bonsai.o .build_config.stamp
 
 # apt CUDA 11 を削除 → NVIDIA 公式 CUDA 13 をインストール → Blackwell FP4 ビルド
 blackwell:
@@ -153,9 +159,9 @@ blackwell:
 	if ! command -v nvcc >/dev/null 2>&1; then export PATH="$$CUDA_BIN:$$PATH"; fi; \
 	echo "nvcc: $$(command -v nvcc)"; \
 	$(MAKE) cutlass; \
-	echo "=== Building Blackwell FP4 ($(BLACKWELL_GENCODE), FA_BR=$(BLACKWELL_FA_BR)) ==="; \
+	echo "=== Building Blackwell ($(BLACKWELL_GENCODE), FA_BR=$(BLACKWELL_FA_BR), Q1_0 GPU) ==="; \
 	$(MAKE) build CUDA_GENCODE="$(BLACKWELL_GENCODE)" NVCC="$(CUDA13_NVCC)" \
-		FA_BR="$(BLACKWELL_FA_BR)" BONSAI_FP4=1
+		FA_BR="$(BLACKWELL_FA_BR)" BONSAI_FP4=0
 
 run: blackwell
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"

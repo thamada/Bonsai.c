@@ -4,6 +4,18 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-28 15:00:35
+
+**`bonsai-8b/gpu-cuda/Makefile`**: **`make blackwell` / `make run` 既定**を **`BONSAI_FP4=0`**（**`sm_120a`** + Q1_0×Q8_0）に変更 — NVFP4 は **`BONSAI_FP4=1`** 明示時のみ。**`.build_config.stamp`**（**`CUDA_GENCODE|fp4=…|fa=…`**）を **`kernels.o` / `fp4_gemm.o` / `fp4_bonsai.o`** の依存に追加し、ビルド設定変更時の古いオブジェクト混入を防止（旧 **`.stamp_bonsai_fp4_*`** を置換）。
+
+**`bonsai-8b/gpu-cuda/fp4_gemm.cu`**: **`fp4_gemm_run_cached`** を **`fp4_gemm_prealloc`** 必須に整理。形状上限超過・バッファ不足は stderr でエラー。**workspace** 不足時は実行時再確保。**`cudaDeviceSynchronize`** 後に CUTLASS **`initialize`**。
+
+**`.gitignore`**: **`bonsai-8b/gpu-cuda/.stamp_bonsai_fp4_*`** を追加（後続 Makefile では **`.build_config.stamp`** に移行予定）。
+
+**`doc/design.md`**: **`make run` 既定 = Blackwell Q1_0**、NVFP4 手動ビルド、**`.build_config.stamp`**、GPU ベンチ表のコマンド注記、**`fp4_gemm_prealloc`**、制約節を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-27 21:44:56
 
 **`bonsai-8b/gpu-rocm-wmma/Makefile`**: **`make log.push`** 実測 2 件を **`BENCH_LOG`** に追記（**`GPU_ARCH=gfx1100`**、130+128 トークン: prefill **199.00** / **199.90**、decode **49.01** / **49.29**、total **79.02** / **79.45** tok/s）。
