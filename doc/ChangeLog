@@ -4,6 +4,14 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-28 15:13:38
+
+**`bonsai-8b/gpu-cuda/main.c`**: **`Bonsai-8B-Q1_0.gguf` 専用**に整理。**Q4_K / Q5_K / IQ2_S / IQ3_S 等**の汎用 CPU 逆量子化・**IQ グリッド表**・**`BlockQ*`** 定義・不要な **`ggml_dtype`** を削除。**`load_weights`** で **`expect_q1_0`** が embedding・各層線形重み・LM head の **`DT_Q1_0`** を要求（**`gpu-rocm/main.c`** と同趣旨）。Q1_0 重みの H2D・Embedding/GEMV は **`kernels.cu`** 側のみ。
+
+**`doc/design.md`**: **`gpu-cuda`** の Q1_0 専用スコープ・ホスト役割（CPU dequant なし・**`expect_q1_0`**）・GGUF dtype 節・制約を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-28 15:00:35
 
 **`bonsai-8b/gpu-cuda/Makefile`**: **`make blackwell` / `make run` 既定**を **`BONSAI_FP4=0`**（**`sm_120a`** + Q1_0×Q8_0）に変更 — NVFP4 は **`BONSAI_FP4=1`** 明示時のみ。**`.build_config.stamp`**（**`CUDA_GENCODE|fp4=…|fa=…`**）を **`kernels.o` / `fp4_gemm.o` / `fp4_bonsai.o`** の依存に追加し、ビルド設定変更時の古いオブジェクト混入を防止（旧 **`.stamp_bonsai_fp4_*`** を置換）。
