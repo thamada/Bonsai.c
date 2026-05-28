@@ -14,7 +14,7 @@
 
 **`bonsai-8b/gpu-cuda/`**（**`main.c`** + **`kernels.cu`** + **`gpu.h`** → **`bonsai-gpu-cuda`**）は **CUDA Runtime のみ（`libcudart`）** の **付録実装**（NVIDIA）。線形層は **Q1_0×Q8_0** のみ（**NVFP4 経路なし**）。README 上は **プロジェクト目的（単一 C・依存最小）の外**と明記し、**将来別リポジトリへ移す予定**。技術メモ・ビルド手順・GPU ベンチマークは README 末尾の **「NVIDIA CUDA 実装（`gpu-cuda`）について」** 付録に、仕様の静的説明は本書に記載。**Prefill** は **`gpu_forward_prefill`**（バッチ並列）、**Decode** は **`gpu_forward`**（1 トークンずつ）。Blackwell 向け **`make run`**（**`make blackwell`**）は **`sm_120a`** ネイティブ + **Q1_0×Q8_0**。
 
-**`bonsai-8b/gpu-cuda-nvfp4/`**（上記と同構成 + **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + **CUTLASS v4.5.1** → **`bonsai-gpu-cuda-nvfp4`**）は **NVFP4 Tensor Core 専用の別付録**。線形層は起動時 **Q1_0 → NVFP4 キャッシュ** + **CUTLASS SM120 block-scaled GEMM**（本書「NVFP4 + CUTLASS（`gpu-cuda-nvfp4`）」）。**`make log` / `make log.push`** でベンチ履歴を **`Makefile` に記録**。**`make run`** 既定は **`sm_120a`** + CUDA 13（**`make blackwell`**）。
+**`bonsai-8b/gpu-cuda-nvfp4/`**（上記と同構成 + **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + **CUTLASS v4.5.1** → **`bonsai-gpu-cuda-nvfp4`**）は **NVFP4 Tensor Core 専用の別付録**。線形層は起動時 **Q1_0 → NVFP4 キャッシュ** + **CUTLASS SM120 block-scaled GEMM**（本書「NVFP4 + CUTLASS（`gpu-cuda-nvfp4`）」）。**`make log` / `make log.push`** でベンチ履歴を **`Makefile` に記録**（**`BENCH_LOG_FILE`** には **VRAM 内訳**も出力）。**`make run`** 既定は **`sm_120a`** + CUDA 13（**`make blackwell`**）。
 
 **`bonsai-8b/gpu-rocm/`**（**`main.c`** + **`kernels.hip`** + **`gpu.h`** → **`bonsai-gpu-rocm`**）は **ROCm HIP のみ（`libamdhip64`）** の **付録実装**（AMD）。**`gpu-cuda`** とほぼ同一の **`gpu.h` C API**（追加 **`gpu_get_device_desc`**）・GGUF・CLI・**`chat_encode`**・RoPE・prefill/decode 分割。**`make log` / `make log.push`** でベンチ履歴を **`Makefile` に記録**。**hipBLAS 不要**。**NVFP4 経路なし**。ビルドは **`hipcc`**、**`GPU_ARCH`** は **`rocminfo`** から **`gfx*`** を自動検出（上書き可）。
 
@@ -38,7 +38,7 @@
 | `bonsai-8b/cpu-omp/main.c` | **CPU、OpenMP マルチスレッド** | **`cpu`** と同一スコープ・GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は融合行内積（**`mm_q1_0_rows`** を OpenMP 行並列）。Attention・SwiGLU 等も **OpenMP**。 |
 | `bonsai-8b/cpu-blas/main.c` | **CPU、OpenMP + OpenBLAS** | **`cpu-omp`** と同一スコープ・GGUF・CLI・**`chat_encode`**・RoPE。**Q1_0** は活性化を **Q8_0** 化して **`vec_dot_q1_0_q8_0`**（AVX2 時は ggml-cpu x86 準拠 SIMD、**`-mfma`**）。Attention はヘッドあたり **2 回の `cblas_sgemv`**。Norm 等 F32 行は OpenMP 行帯 + serial **`sgemv`**。起動時 **`openblas_set_num_threads(1)`**。 |
 | `bonsai-8b/gpu-cuda/main.c` + **`kernels.cu`** | **NVIDIA GPU、CUDA（付録）** | **`Bonsai-8B-Q1_0.gguf` 専用**（**`expect_q1_0`** で線形重みを検証）。**`main.c` に CPU 逆量子化コードは持たない**（Q1_0 重みは **`kernels.cu`** 側で mmap → **H2D**）。Prefill/decode 分割・Q8_0 活性化 + Q1_0 GEMV・Flash Attention。 |
-| `bonsai-8b/gpu-cuda-nvfp4/main.c` + **`kernels.cu`** | **NVIDIA GPU、CUDA NVFP4（付録）** | **`gpu-cuda`** と同 API・GGUF・prefill/decode 分割。線形層のみ **NVFP4 + CUTLASS**（**`fp4_bonsai_mm`**）。Attention 等は Q1_0 版カーネルと同型。 |
+| `bonsai-8b/gpu-cuda-nvfp4/main.c` + **`kernels.cu`** | **NVIDIA GPU、CUDA NVFP4（付録）** | **`gpu-cuda`** と同 API・GGUF・prefill/decode 分割。線形層のみ **NVFP4 + CUTLASS**（**`fp4_bonsai_mm`**）。Attention 等は Q1_0 版カーネルと同型。**`GpuVramProfile` / `gpu_model_vram_profile`** で VRAM 内訳を取得。 |
 | `bonsai-8b/gpu-rocm/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP（付録）** | **`gpu-cuda`** と同 API・アルゴリズム（Q8_0 活性化 + Q1_0 GEMV、Flash Attention、prefill バッチ）。**hipBLAS 不要**。 |
 | `bonsai-8b/gpu-rocm-wmma/main.c` + **`kernels.hip`** | **AMD GPU、ROCm/HIP + rocWMMA（付録）** | **`gpu-rocm`** 派生。**Prefill** の **QK^T** のみ **rocWMMA 16×16×16**（**PV** は F32 スカラー）。**Decode**・線形層は **`gpu-rocm`** 同一。Prefill / total の優劣は **GPU 依存**（**gfx1201** では Prefill が低い例、**gfx1100** では total が上回る例あり）。 |
 
@@ -119,6 +119,8 @@
 | 計測日時 | GPU | prefill tok/s | decode tok/s | total tok/s | 備考 |
 |----------|-----|-------------:|-------------:|------------:|------|
 | 2026-05-28 18:48 | **sm_120** | **5751.92** | **64.12** | **127.80** | 130+128 トークン |
+| 2026-05-28 20:30 | **sm_120** | **5762.22** | **64.14** | **127.84** | 同上（2 回目） |
+| 2026-05-28 20:30 | **sm_120** | **5757.93** | **64.20** | **127.96** | 同上（3 回目） |
 
 上記 **Q1_0 短プロンプト表**とは**直接比較しない**（プロンプト長・トークン数が異なる）。
 
@@ -180,12 +182,12 @@
 | `bonsai-8b/gpu-cuda/kernels.cu` | **CUDA カーネルと VRAM 管理**（**Q1_0×Q8_0 GEMV** のみ。単トークン／**バッチ** Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`** 等）。 |
 | `bonsai-8b/gpu-cuda/gpu.h` | **`GpuModel`** / **`gpu_model_create`** / **`gpu_forward`** / **`gpu_forward_prefill`** / **`gpu_copy_logits`** 等の C API（**`extern "C"`**）。 |
 | `bonsai-8b/gpu-cuda/Makefile` | **`bonsai-gpu-cuda`** の生成。**`.DEFAULT_GOAL := run`**（**`make blackwell`** → **`sm_120a`** + Q1_0）。**`build`**: **`nvidia-smi` 自動 `CUDA_GENCODE`**（**12.x → `sm_120` + `FA_BR=32`** 等、上書き可）。**`blackwell`**: 初回のみ apt（CUDA 11 削除 → **`cuda-toolkit-13`**）；**`$(CUDA13_NVCC)` が CUDA 13+ なら apt をスキップ**（**`FORCE_CUDA_APT=1`** で強制再実行）。**`.build_config.stamp`**（**`CUDA_GENCODE|fa=…`**）。**`nvcc` 実体を `PATH` 先頭**（`nvlink` 対策）。 |
-| `bonsai-8b/gpu-cuda-nvfp4/main.c` | **`gpu-cuda/main.c` と同趣旨のホスト側**（GGUF・CLI・**`expect_q1_0`**）。 |
-| `bonsai-8b/gpu-cuda-nvfp4/kernels.cu` | **`gpu-cuda/kernels.cu` をベースに線形層を常に NVFP4 経由**（**`gpu_mm_fp4`** / **`fp4_bonsai_mm`**）。Attention・Norm 等は Q1_0 版と同型。 |
-| `bonsai-8b/gpu-cuda-nvfp4/fp4_bonsai.cu` / **`fp4_bonsai.h`** | **Q1_0 → NVFP4 重みキャッシュ**、F32 活性化 ↔ BF16 ↔ **`fp4_gemm_run_cached`** ブリッジ。起動時 **128³ サニティ GEMM**、活性化パディングは **`M_act`/`M_pad` 分離**（OOB 防止）。 |
-| `bonsai-8b/gpu-cuda-nvfp4/fp4_gemm.cu` / **`fp4_gemm.h`** | CUTLASS **SM120 block-scaled NVFP4 GEMM**（Example 79a ベース）。各 GEMM 前 **`fp4_gemm_init`**、workspace は縮小しない。 |
-| `bonsai-8b/gpu-cuda-nvfp4/gpu.h` | **`gpu-cuda/gpu.h` と同一**。 |
-| `bonsai-8b/gpu-cuda-nvfp4/Makefile` | **`bonsai-gpu-cuda-nvfp4`** の生成。**`.DEFAULT_GOAL := run`**（**`make blackwell`** → **`sm_120a`** + NVFP4）。**`make cutlass`**（**`CUTLASS_TAG=v4.5.1`**）。**`blackwell`** / **`.build_config.stamp`** は **`gpu-cuda`** と同趣旨（**`fp4_gemm.o` / `fp4_bonsai.o`** もスタンプ依存）。 |
+| `bonsai-8b/gpu-cuda-nvfp4/main.c` | **`gpu-cuda/main.c` と同趣旨のホスト側**（GGUF・CLI・**`expect_q1_0`**）。終了時 **`write_benchmark_log`** に **VRAM 内訳**（**`[vram_breakdown]`**）を追記。 |
+| `bonsai-8b/gpu-cuda-nvfp4/kernels.cu` | **`gpu-cuda/kernels.cu` をベースに線形層を常に NVFP4 経由**（**`gpu_mm_fp4`** / **`fp4_bonsai_mm`**）。Attention・Norm 等は Q1_0 版と同型。**`gpu_model_vram_profile`**（**`GpuVramProfile`** 集計）。 |
+| `bonsai-8b/gpu-cuda-nvfp4/fp4_bonsai.cu` / **`fp4_bonsai.h`** | **Q1_0 → NVFP4 重みキャッシュ**、F32 活性化 ↔ BF16 ↔ **`fp4_gemm_run_cached`** ブリッジ。起動時 **128³ サニティ GEMM**、活性化パディングは **`M_act`/`M_pad` 分離**（OOB 防止）。**`fp4_bonsai_vram_bytes`**（BF16 活性／出力バッファ）。 |
+| `bonsai-8b/gpu-cuda-nvfp4/fp4_gemm.cu` / **`fp4_gemm.h`** | CUTLASS **SM120 block-scaled NVFP4 GEMM**（Example 79a ベース）。各 GEMM 前 **`fp4_gemm_init`**、workspace は縮小しない。**`fp4_weight_cache_vram_bytes`** / **`fp4_gemm_vram_bytes`**（NVFP4 重みキャッシュ・GEMM 作業領域）。 |
+| `bonsai-8b/gpu-cuda-nvfp4/gpu.h` | **`gpu-cuda/gpu.h` をベースに `GpuVramProfile` / `gpu_model_vram_profile` を追加**（他 API は同一）。 |
+| `bonsai-8b/gpu-cuda-nvfp4/Makefile` | **`bonsai-gpu-cuda-nvfp4`** の生成。**`.DEFAULT_GOAL := run`**（**`make blackwell`** → **`sm_120a`** + NVFP4）。**`make cutlass`**（**`CUTLASS_TAG=v4.5.1`**）。**`log`** / **`log.push`**（**`gpu-rocm`** と同趣旨の長プロンプトベンチ。**`BENCH_LOG`** 第 2 列は **`GPU_LABEL`** = **`sm_120`** 等）。**`blackwell`** / **`.build_config.stamp`** は **`gpu-cuda`** と同趣旨（**`fp4_gemm.o` / `fp4_bonsai.o`** もスタンプ依存）。 |
 | `bonsai-8b/gpu-cuda-nvfp4/third_party/cutlass/` | **`make cutlass`** で取得（**v4.5.1** 必須。旧 v3.9.0 は RTX 5090 で GEMM `initialize` 失敗）。 |
 | `bonsai-8b/gpu-rocm/main.c` | **`cpu-blas` / `gpu-cuda` と同趣旨のホスト側**（GGUF mmap・メタデータ・トークナイザ・サンプリング・進捗表示）。**CPU デ量子化コードは持たない**（Q1_0 重みは **`kernels.hip`** 側で mmap → **H2D**）。終了時 **`write_benchmark_log`**（**`BENCH_LOG_FILE`** 既定 **`/tmp/benchmark.log`**）。**`generate()`** 内の prefill/decode 計測は **重み H2D 後**のみ。 |
 | `bonsai-8b/gpu-rocm/kernels.hip` | **HIP カーネルと VRAM 管理**（Q1_0×Q8_0 GEMV、Norm・RoPE・SwiGLU、**Flash Attention** decode/prefill、**`gpu_forward`** / **`gpu_forward_prefill`**、**`flash_attn_init_once`**、**`gpu_get_device_desc`**）。**`GpuBlockQ1_0` / `GpuBlockQ8_0`** は **`gpu.h`** 定義。 |
@@ -223,7 +225,7 @@
 | `bonsai-8b/cpu-omp/Makefile` | `build` / `run` / `clean` | `cpu-omp/bonsai-cpu-omp` | `cpu-omp/main.c` |
 | `bonsai-8b/cpu-blas/Makefile` | `build` / `run` / `clean` / **`log`** / **`log.push`** | `cpu-blas/bonsai-cpu-blas` | `cpu-blas/main.c` |
 | `bonsai-8b/gpu-cuda/Makefile` | **`run`**（既定）/ `build` / `clean` / **`blackwell`** | `gpu-cuda/bonsai-gpu-cuda` | `main.c` + `kernels.cu` |
-| `bonsai-8b/gpu-cuda-nvfp4/Makefile` | **`run`**（既定）/ `build` / `clean` / **`blackwell`** / **`cutlass`** | `gpu-cuda-nvfp4/bonsai-gpu-cuda-nvfp4` | `main.c` + `kernels.cu` + `fp4_*.cu` |
+| `bonsai-8b/gpu-cuda-nvfp4/Makefile` | **`run`**（既定）/ `build` / `clean` / **`blackwell`** / **`cutlass`** / **`log`** / **`log.push`** | `gpu-cuda-nvfp4/bonsai-gpu-cuda-nvfp4` | `main.c` + `kernels.cu` + `fp4_*.cu` |
 | `bonsai-8b/gpu-rocm/Makefile` | **`run`**（既定）/ `build` / `clean` / **`detect-gpu-arch`** / **`log`** / **`log.push`** | `gpu-rocm/bonsai-gpu-rocm` | `main.c` + `kernels.hip`（**`hipcc -x hip`**） |
 | `bonsai-8b/gpu-rocm-wmma/Makefile` | **`run`**（既定）/ `build` / `clean` / **`detect-gpu-arch`** / **`log`** / **`log.push`** | `gpu-rocm-wmma/bonsai-gpu-rocm-wmma` | `main.c` + `kernels.hip`（**rocWMMA** Prefill Attention） |
 
@@ -278,6 +280,7 @@ cd bonsai-8b/gpu-cuda-nvfp4
 make cutlass            # 初回または CUTLASS 更新時（rm -rf third_party/cutlass 後でも可）
 make run                # blackwell → sm_120a + NVFP4
 # ./bonsai-gpu-cuda-nvfp4 ../Bonsai-8B-Q1_0.gguf -p "Hello"
+# 長プロンプトベンチ: make log.push → make log
 ```
 
 GPU ROCm 版（AMD）:
@@ -357,13 +360,30 @@ make run
 |------|----------|
 | CUTLASS 取得（v4.5.1） | **`make cutlass`** |
 | Blackwell + NVFP4（`sm_120a`、既定） | **`make`** / **`make run`**（**`make blackwell`**） |
+| ベンチマーク履歴表示 | **`make log`** |
+| ベンチ実行＋履歴追記 | **`make log.push`**（上書き: **`BENCH_N=64`** 等） |
 
 ```bash
 cd bonsai-8b/gpu-cuda-nvfp4
 make cutlass
 make run
 ./bonsai-gpu-cuda-nvfp4 ../Bonsai-8B-Q1_0.gguf -p "Hello" -n 8
+# 長プロンプトベンチ: make log.push → make log
 ```
+
+**`gpu-cuda-nvfp4` ベンチマークログ（`log.push`）**:
+
+| 変数 | 既定 | 意味 |
+|------|------|------|
+| `BENCH_PROMPT` | 長文英文（Makefile 内） | ChatML 化後 **約 130 トークン** |
+| `BENCH_N` | `128` | 最大生成トークン数 |
+| `BENCH_SEED` | `42` | 乱数シード |
+| `BENCH_LOG_FILE` | `/tmp/benchmark.log` | key=value ログ出力先 |
+| `GPU_LABEL` | **`sm_120`** 等 | 履歴第 2 列（compute capability 短縮ラベル） |
+
+**`BENCH_LOG` 形式**: **`ISO8601|GPU_LABEL|hostname|prompt|gen|prefill|decode|total`**。**`total_tps`** は推論区間のみ（モデル mmap 読み込みは含めない）。**`make log.push` は `gpu-cuda-nvfp4/Makefile` を書き換える**。
+
+**`BENCH_LOG_FILE` の VRAM 項目**（推論終了時 **`write_benchmark_log`**）: **`vram_total`** / **`vram_device_used`** / **`vram_device_total`**（各 **bytes** と **`_mib`**）、**`[vram_breakdown]`** セクションに **`vram_weights_q1_embd`**・**`vram_weights_f32_norm`**・**`vram_weights_fp4`**・**`vram_kv_cache`**・**`vram_decode_activations`**・**`vram_prefill_batch`**・**`vram_fp4_gemm_scratch`**。内訳は **`gpu_model_vram_profile`**（**`GpuVramProfile`**）の集計値。**`device_used_bytes`** は **`cudaMemGetInfo`** による推定（CUDA ランタイム／他プロセス分を含む場合あり）。
 
 **要件（共通）**: CUDA Toolkit（**`nvcc`**）、NVIDIA ドライバ、**`libcudart`**。cuBLAS は不要（Attention はカスタム CUDA カーネル）。Debian/Ubuntu の **`apt install nvidia-cuda-toolkit`** は **CUDA 11** 系であり、**Blackwell（compute capability 12.x）** および **NVFP4 Tensor Core** には **CUDA 13 以降**と **`sm_120a`** ネイティブコードが必要。
 
@@ -532,6 +552,21 @@ LM head は **末尾トークン**（`n_tokens - 1`）のみ。Prefill 後の De
 1. **起動時**: **`gpu-cuda`** と同様に Q1_0 重みを mmap → VRAM。**`fp4_bonsai_init`** で線形層を **NVFP4 キャッシュ**化、**`fp4_gemm_prealloc`** と **128³ サニティ GEMM**（**`fp4_gemm_run_cached`**）。stderr に `GPU: FP4 Tensor Core path enabled`。
 2. **Prefill / Decode**: **`gpu-cuda`** と同型。線形層は **`fp4_bonsai_mm`** → **`fp4_gemm_run_cached`**（各 GEMM 前 **`fp4_gemm_init(M,N,K)`**。活性化は F32 → BF16 パッド（**`m >= M_act` は 0**）→ NVFP4）。
 3. **VRAM 重み（線形層）**: Q1_0 blob に加え **NVFP4 + block scale の GPU キャッシュ**（起動時変換）。Embedding は Q1_0 のまま。
+4. **VRAM プロファイル**（推論終了時）: **`gpu_model_vram_profile(gm, &profile)`**（**`gpu.h`** の **`GpuVramProfile`**）が推論バッファの理論バイト数をカテゴリ別に集計。**`total_bytes`** = Q1_0 embedding + F32 norm + NVFP4 線形重み + KV + decode 活性 + prefill バッチ + FP4 GEMM スクラッチ（**`fp4_bonsai_vram_bytes` + `fp4_gemm_vram_bytes`**）。**`device_total_bytes` / `device_used_bytes`** は **`cudaMemGetInfo`** から取得（利用可能時）。**`main.c`** の **`write_benchmark_log`** が **`BENCH_LOG_FILE`** に内訳を書き出す（**`make log.push`** の tok/s 履歴とは別ファイル）。
+
+#### VRAM プロファイル（`GpuVramProfile`）
+
+| フィールド | 内容 |
+|------------|------|
+| `weights_q1_embd_bytes` | Q1_0 **`token_embd`**（VRAM 常駐 blob） |
+| `weights_f32_norm_bytes` | F32 norm 重み（attn / q_norm / k_norm / ffn / output norm） |
+| `weights_fp4_bytes` | NVFP4 線形重みキャッシュ（**`wq`〜`down`** + LM head） |
+| `kv_cache_bytes` | **`kc` / `vc`**（`n_layers × max_seq × kv_dim` × F32 × 2） |
+| `decode_activations_bytes` | 単トークン decode 用 F32 / Q8_0 バッファ |
+| `prefill_batch_bytes` | prefill バッチ用（**`batch_cap = max_seq`**） |
+| `fp4_gemm_scratch_bytes` | BF16 活性／出力バッファ + CUTLASS workspace 等 |
+| `total_bytes` | 上記の合計（理論値） |
+| `device_used_bytes` / `device_total_bytes` | **`cudaMemGetInfo`**（実行時スナップショット） |
 
 #### NVFP4 + CUTLASS（`gpu-cuda-nvfp4`）
 
@@ -551,9 +586,9 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 | ファイル | 役割 |
 |----------|------|
-| `fp4_gemm.cu` | CUTLASS **SM120 block-scaled NVFP4 GEMM**（**v4.5.1**）。起動時 **`fp4_gemm_prealloc`**。**`fp4_gemm_run_cached`** は workspace 不足時のみ再確保（縮小しない）、`cudaDeviceSynchronize` 後に **`initialize`**。`beta=0` 時は epilogue の `C` を `nullptr` |
-| `fp4_bonsai.cu` | Q1_0 → **起動時** NVFP4 重みキャッシュ、推論時 F32 ↔ BF16 ↔ GEMM。**`f32_to_bf16_pad_kernel`** は **`M_act`/`M_pad` 分離** |
-| `kernels.cu` | 常に **`gpu_mm_fp4`** / **`fp4_bonsai_mm`** |
+| `fp4_gemm.cu` | CUTLASS **SM120 block-scaled NVFP4 GEMM**（**v4.5.1**）。起動時 **`fp4_gemm_prealloc`**。**`fp4_gemm_run_cached`** は workspace 不足時のみ再確保（縮小しない）、`cudaDeviceSynchronize` 後に **`initialize`**。`beta=0` 時は epilogue の `C` を `nullptr`。**`fp4_weight_cache_vram_bytes`** / **`fp4_gemm_vram_bytes`** |
+| `fp4_bonsai.cu` | Q1_0 → **起動時** NVFP4 重みキャッシュ、推論時 F32 ↔ BF16 ↔ GEMM。**`f32_to_bf16_pad_kernel`** は **`M_act`/`M_pad` 分離**。**`fp4_bonsai_vram_bytes`** |
+| `kernels.cu` | 常に **`gpu_mm_fp4`** / **`fp4_bonsai_mm`**。**`gpu_model_vram_profile`** |
 
 **対象レイヤ**: **`wq`〜`down`** と **`output`（LM head）** のみ。**`M`/`N`/`K` は 128 倍数**。GGUF は Q1_0 のまま、**BF16 復元 → NVFP4 キャッシュ**は起動時。ビット図・ビルド手順の全文は **README 付録「NVFP4 + CUTLASS」**（未更新時は本書を正とする）を参照。
 
@@ -590,7 +625,7 @@ bit 3 = 符号（0=非負、1=負）。**0.75 は E2M1 の離散値ではない*
 
 ## アーキテクチャ（`cpu/main.c` / `gpu-cuda/` / `gpu-cuda-nvfp4/` / `gpu-rocm/`）
 
-**CPU 3 バリアント**は **1 ファイルの `main.c`** に実装を集約する（バリアント間でソースを `#include` しない）。**`gpu-cuda`** は **`main.c`（ホスト）** + **`kernels.cu`（デバイス、Q1_0 のみ）** + **`gpu.h`（API）**。**`gpu-cuda-nvfp4`** は同構成に **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + **CUTLASS v4.5.1** を追加し、**`kernels.cu`** は線形層を常に NVFP4 経由。**`gpu-rocm`** は **`main.c` + `kernels.hip` + `gpu.h`（`gpu_get_device_desc` 追加）** で **HIP** に置換した付録。**`cpu-omp/main.c`** はデータ構造・推論フェーズは **`cpu`** と同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生。**`gpu-cuda/main.c`** / **`gpu-cuda-nvfp4/main.c`** / **`gpu-rocm/main.c`** / **`gpu-rocm-wmma/main.c`** は **`cpu-blas`** から CPU forward を除き **`gpu_forward`** 呼び出しに置換した派生として読む。**`gpu-rocm-wmma/kernels.hip`** は **`gpu-rocm/kernels.hip`** の Prefill Attention カーネルのみ rocWMMA 版に差し替え。
+**CPU 3 バリアント**は **1 ファイルの `main.c`** に実装を集約する（バリアント間でソースを `#include` しない）。**`gpu-cuda`** は **`main.c`（ホスト）** + **`kernels.cu`（デバイス、Q1_0 のみ）** + **`gpu.h`（API）**。**`gpu-cuda-nvfp4`** は同構成に **`fp4_bonsai.cu`** / **`fp4_gemm.cu`** + **CUTLASS v4.5.1** を追加し、**`kernels.cu`** は線形層を常に NVFP4 経由。**`gpu.h`** は **`GpuVramProfile` / `gpu_model_vram_profile`** を追加（**`gpu-cuda`** には無い）。**`gpu-rocm`** は **`main.c` + `kernels.hip` + `gpu.h`（`gpu_get_device_desc` 追加）** で **HIP** に置換した付録。**`cpu-omp/main.c`** はデータ構造・推論フェーズは **`cpu`** と同じで、ホットパスに **OpenMP** を挟んだ派生として読む。**`cpu-blas/main.c`** はさらに **OpenBLAS** と **Q1_0×Q8_0 SIMD 内積**でホットパスを置き換えた派生。**`gpu-cuda/main.c`** / **`gpu-cuda-nvfp4/main.c`** / **`gpu-rocm/main.c`** / **`gpu-rocm-wmma/main.c`** は **`cpu-blas`** から CPU forward を除き **`gpu_forward`** 呼び出しに置換した派生として読む。**`gpu-rocm-wmma/kernels.hip`** は **`gpu-rocm/kernels.hip`** の Prefill Attention カーネルのみ rocWMMA 版に差し替え。
 
 ### レイヤー構成（概略）
 
@@ -652,7 +687,7 @@ GPT-2 系 BPE と特殊トークン。**全バリアント共通**の **`chat_en
 - **CPU 3 バリアント**および **`gpu-cuda`** / **`gpu-rocm`** / **`gpu-rocm-wmma`** は **`Bonsai-8B-Q1_0.gguf` 専用**（線形重み **Q1_0** + norm **F32**）。**Q4_K / IQ2_S / IQ3_S 等**の汎用逆量子化パスは **2026-05-27（CPU）** / **2026-05-28（`gpu-cuda/main.c`）** に削除。他 GGUF は **`expect_q1_0`** / **`expect_q1_0_weight`** / **`mm`** でエラー終了。
 - **`cpu-blas`** は **OpenBLAS**（`libopenblas-dev` 等）が必要。**AVX2** 非対応 CPU では Q1_0 内積が generic 参照実装にフォールバックする（Makefile は **AVX2 不可なら `-mavx` または `-march=x86-64`**）。**`-ffast-math`** と **FMA 対応時の `-mfma`** 使用のため、環境によっては **`cpu`** / **`cpu-omp`** と数値がわずかに異なり得る。長プロンプト **`make log.push`** では **`avx2+fma`** と **`avx`** で total tok/s が大きく異なりうる（上記 CPU 長プロンプト表）。旧 **`-march=native`** 固定は廃止（クロスビルド・非 x86 ホストでは **`ARCH_FLAGS`** を明示指定）。**`make log.push`** は **`cpu-blas/Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-cuda`**（付録・NVIDIA・Q1_0）: **CUDA Toolkit**・NVIDIA ドライバ・GPU 実機が必要。本書「実行時の挙動（gpu-cuda）」参照。**将来別リポジトリ移行予定**。RTX 5090 参考（2026-05-28 **`make run`**、**`sm_120a` Q1_0**）: prefill **~312 tok/s**、decode **~47 tok/s**（`-p "Hello, how are you?"`）。**PTX `compute_86` JIT は RTX 50 系で推論破損**。**`make run`** は **CUDA 13**・**`sm_120a`**（**`make blackwell`**）。**`make build`** は **`nvidia-smi` で `CUDA_GENCODE` 自動選択**。Blackwell は **`FA_BR=32`**。
-- **`gpu-cuda-nvfp4`**（付録・NVIDIA・NVFP4）: 上記に加え **CUTLASS v4.5.1**（**`make cutlass`**）。**`bonsai-gpu-cuda-nvfp4`**。**`make log` / `make log.push`** でベンチ履歴を **`Makefile` に記録**。RTX 5090 参考（長プロンプト 130+128、**`make log.push`**）: prefill **5751.92** / decode **64.12** / total **127.80 tok/s**（2026-05-28）。旧 CUTLASS v3.9.0 は **`initialize: Error Internal`**。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`（128）** 制約は **`gpu-cuda`** と同趣旨。**`make log.push` は `Makefile` を書き換える**（コミット前に差分確認）。
+- **`gpu-cuda-nvfp4`**（付録・NVIDIA・NVFP4）: 上記に加え **CUTLASS v4.5.1**（**`make cutlass`**）。**`bonsai-gpu-cuda-nvfp4`**。**`make log` / `make log.push`** でベンチ履歴を **`Makefile` に記録**（**`BENCH_LOG_FILE`** には tok/s に加え **VRAM 内訳**を key=value 出力）。RTX 5090 参考（長プロンプト 130+128、**`make log.push`**）: prefill **~5758–5762** / decode **~64.1–64.2** / total **~127.8–128.0 tok/s**（2026-05-28、3 回計測）。旧 CUTLASS v3.9.0 は **`initialize: Error Internal`**。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`（128）** 制約は **`gpu-cuda`** と同趣旨。**`GpuVramProfile`** でカテゴリ別 VRAM を推定可能。**`make log.push` は `Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-rocm`**（付録・AMD）: **ROCm**・**`hipcc`**・AMD GPU 実機が必要。本書「ビルドと実行（GPU ROCm）」「実行時の挙動（gpu-rocm）」参照。**hipBLAS 不要**。**NVFP4 非対応**。**`GPU_ARCH`** は **`rocminfo`** 自動（未検出時は手動指定）。**`g++` / `libstdc++-dev`** 必須。**VRAM**・**`max_seq`**・**`head_dim > FA_HD`** 制約は **`gpu-cuda`** と同趣旨。参考ベンチマーク: 上記 **GPU ROCm 表**（**gfx1201** / **gfx1100** 等・長プロンプト 130 + 生成 128。**GPU_ARCH** ごとにホストが異なる場合あり）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
 - **`gpu-rocm-wmma`**（付録・AMD・実験）: **`gpu-rocm`** 要件に加え **rocWMMA**（ROCm 同梱ヘッダ）。Prefill Attention QK^T の WMMA 化のみ。**Prefill / decode / total の優劣は GPU 依存**（**gfx1201** では Prefill が **`gpu-rocm`** より低い例、**gfx1100** では total が上回る例 — 本書 **GPU ROCm WMMA 表**）。**`make log.push`** は **`Makefile` を書き換える**（コミット前に差分確認）。
 - **画像・マルチモーダル入力は非対応**（テキストデコーダのみ）。

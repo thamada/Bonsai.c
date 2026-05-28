@@ -617,7 +617,7 @@ If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
 ## NVIDIA CUDA NVFP4 implementation (`gpu-cuda-nvfp4`)
 
-**`bonsai-8b/gpu-cuda-nvfp4/`** is a separate appendix with the same GGUF, CLI, and prefill/decode split as **`gpu-cuda`**, but **linear layers** use **NVFP4 Tensor Core + CUTLASS**. Binary: **`bonsai-gpu-cuda-nvfp4`**. Requires **CUTLASS v4.5.1** (older v3.9.0 fails GEMM `initialize` on RTX 5090). Use **`make log` / `make log.push`** to record benchmark history in **`gpu-cuda-nvfp4/Makefile`**. See **`doc/design.md`** (“Runtime behavior (`gpu-cuda-nvfp4`)”) for the full spec.
+**`bonsai-8b/gpu-cuda-nvfp4/`** is a separate appendix with the same GGUF, CLI, and prefill/decode split as **`gpu-cuda`**, but **linear layers** use **NVFP4 Tensor Core + CUTLASS**. Binary: **`bonsai-gpu-cuda-nvfp4`**. Requires **CUTLASS v4.5.1** (older v3.9.0 fails GEMM `initialize` on RTX 5090). Use **`make log` / `make log.push`** to record benchmark history in **`gpu-cuda-nvfp4/Makefile`**. After each run, **`BENCH_LOG_FILE`** (default **`/tmp/benchmark.log`**) also records **VRAM breakdown** (**`GpuVramProfile`** / **`gpu_model_vram_profile`**) as key=value fields in addition to tok/s. See **`doc/design.md`** (“Runtime behavior (`gpu-cuda-nvfp4`)”) for the full spec.
 
 ### Directory layout
 
@@ -626,7 +626,7 @@ bonsai-8b/gpu-cuda-nvfp4/
 ├── Makefile
 ├── main.c
 ├── kernels.cu          # linear layers always gpu_mm_fp4 → fp4_bonsai_mm
-├── gpu.h
+├── gpu.h               # adds GpuVramProfile / gpu_model_vram_profile
 ├── fp4_bonsai.cu / fp4_bonsai.h
 ├── fp4_gemm.cu / fp4_gemm.h
 └── third_party/cutlass/   # make cutlass (CUTLASS_TAG=v4.5.1)
@@ -638,9 +638,9 @@ bonsai-8b/gpu-cuda-nvfp4/
 
 | File | Role |
 |---|---|
-| `fp4_gemm.cu` | CUTLASS **SM120 block-scaled NVFP4 GEMM**. Startup **`fp4_gemm_prealloc`**. **`fp4_gemm_init(M,N,K)`** before each GEMM |
-| `fp4_bonsai.cu` | Q1_0 → NVFP4 weight cache, F32 ↔ BF16 ↔ GEMM. Activation padding uses separate **`M_act` / `M_pad`** |
-| `kernels.cu` | Always **`fp4_bonsai_mm`** (no `#ifdef`) |
+| `fp4_gemm.cu` | CUTLASS **SM120 block-scaled NVFP4 GEMM**. Startup **`fp4_gemm_prealloc`**. **`fp4_gemm_init(M,N,K)`** before each GEMM. **`fp4_weight_cache_vram_bytes`** / **`fp4_gemm_vram_bytes`** |
+| `fp4_bonsai.cu` | Q1_0 → NVFP4 weight cache, F32 ↔ BF16 ↔ GEMM. Activation padding uses separate **`M_act` / `M_pad`**. **`fp4_bonsai_vram_bytes`** |
+| `kernels.cu` | Always **`fp4_bonsai_mm`** (no `#ifdef`). **`gpu_model_vram_profile`** |
 
 **Layers:** `wq` through `down` and `output` (LM head). **`M`/`N`/`K` must be multiples of 128**. stderr should show `GPU: FP4 Tensor Core path enabled` at startup.
 
@@ -683,6 +683,8 @@ make log               # print BENCH_LOG as a table
 
 **Note:** **`make log.push` modifies `gpu-cuda-nvfp4/Makefile`**. Check **`git diff`** before committing. Table **`total_tps`** is **inference only** (VRAM weight upload excluded).
 
+**VRAM fields in `BENCH_LOG_FILE`** (written after each run): **`vram_total`**, **`vram_device_used`** / **`vram_device_total`** (**`cudaMemGetInfo`**, each in **bytes** and **`_mib`**), and a **`[vram_breakdown]`** section (Q1_0 embedding / F32 norm / NVFP4 linear weights / KV / decode activations / prefill batch / FP4 GEMM scratch). **`BENCH_LOG`** in the Makefile stores tok/s only; see **`BENCH_LOG_FILE`** for VRAM breakdown.
+
 ### Reference benchmark (NVFP4, RTX 5090)
 
 | Item | Value |
@@ -697,6 +699,8 @@ make log               # print BENCH_LOG as a table
 | Timestamp | GPU | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
 |---|---|---:|---:|---:|---|
 | 2026-05-28 18:48 | **sm_120** | **5751.92** | **64.12** | **127.80** | 130+128 tokens (**`make log.push`**) |
+| 2026-05-28 20:30 | **sm_120** | **5762.22** | **64.14** | **127.84** | same (2nd run) |
+| 2026-05-28 20:30 | **sm_120** | **5757.93** | **64.20** | **127.96** | same (3rd run) |
 
 Do **not** compare this table directly to the **Q1_0 GPU (`make run`, short prompt)** table (different prompt length and token counts).
 

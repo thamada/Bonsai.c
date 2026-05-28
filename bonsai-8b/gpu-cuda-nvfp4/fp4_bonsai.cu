@@ -211,3 +211,8 @@ void fp4_bonsai_mm(const void *weight_cache,
         g_out_bf16, y, M, d, N_pad);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
+
+size_t fp4_bonsai_vram_bytes(void)
+{
+    return g_act_cap * sizeof(__nv_bfloat16) + g_out_cap * sizeof(__nv_bfloat16);
+}

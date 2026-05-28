@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-28 20:35:37
+
+**`bonsai-8b/gpu-cuda-nvfp4/`**: **VRAM プロファイル**を追加。**`gpu.h`**: **`GpuVramProfile`**（重み Q1_0 embedding / F32 norm / NVFP4 線形層 / KV / decode 活性 / prefill バッチ / FP4 GEMM スクラッチ / デバイス使用量）と **`gpu_model_vram_profile`** API。**`kernels.cu`**: 上記 API 実装（**`fp4_weight_cache_vram_bytes`** / **`fp4_bonsai_vram_bytes`** / **`fp4_gemm_vram_bytes`** を集計）。**`fp4_bonsai.cu`** / **`fp4_gemm.cu`**: 各 VRAM バイト数ヘルパ。**`main.c`**: 推論終了時 **`write_benchmark_log`** に **`vram_total`**・**`vram_device_*`**（**`cudaMemGetInfo`**）・**`[vram_breakdown]`** セクション（各カテゴリ bytes + MiB）を追記。**`make log.push`** 実測 2 件を **`BENCH_LOG`** に追記（130+128 トークン: prefill **5762.22** / **5757.93**、decode **64.14** / **64.20**、total **127.84** / **127.96** tok/s）。
+
+**`doc/design.md`**: VRAM プロファイル API・ベンチログ形式・NVFP4 ベンチ表・実行挙動・制約を追随。
+
+**`README.md` / `README.en.md`**: NVFP4 付録に VRAM プロファイル・**`BENCH_LOG_FILE`** VRAM 項目・ベンチ表 2 行追加・実装表を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-28 18:51:19
 
 **`bonsai-8b/gpu-cuda-nvfp4/`**（新規）: NVFP4 + CUTLASS 経路を **`gpu-cuda`** から分離。**`bonsai-gpu-cuda-nvfp4`**、**`fp4_bonsai.cu`** / **`fp4_gemm.cu`** / **`third_party/cutlass/`**（**`CUTLASS_TAG=v4.5.1`**）。**`kernels.cu`** は線形層を常に **`fp4_bonsai_mm`**（**`#ifdef BONSAI_FP4` なし**）。**`fp4_bonsai.cu`**: 活性化 BF16 パッドで **`M_act`/`M_pad` 分離**（OOB 防止）、起動時 **128³ サニティ GEMM**。**`fp4_gemm.cu`**: 各 GEMM 前 **`fp4_gemm_init`**、workspace 縮小禁止、`beta=0` 時 epilogue `C=nullptr`。**`Makefile`**: compute 12.x 既定 **`sm_120a`**、**`make blackwell`** / **`make cutlass`**。
