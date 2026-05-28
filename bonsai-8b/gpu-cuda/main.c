@@ -856,6 +856,72 @@ static int is_special(Tok *tk, int id) {
            id == tk->hdr_start || id == tk->hdr_end;
 }
 
+typedef struct {
+    char  *data;
+    size_t len;
+    size_t cap;
+} GenBuf;
+
+static void genbuf_init(GenBuf *gb) {
+    gb->data = NULL;
+    gb->len = 0;
+    gb->cap = 0;
+}
+
+static void genbuf_free(GenBuf *gb) {
+    free(gb->data);
+    gb->data = NULL;
+    gb->len = gb->cap = 0;
+}
+
+static int genbuf_reserve(GenBuf *gb, size_t need) {
+    if (need <= gb->cap) return 1;
+    size_t ncap = gb->cap ? gb->cap : 256;
+    while (ncap < need) ncap *= 2;
+    char *p = (char *)realloc(gb->data, ncap);
+    if (!p) return 0;
+    gb->data = p;
+    gb->cap = ncap;
+    return 1;
+}
+
+static int genbuf_putc(GenBuf *gb, int ch) {
+    if (!genbuf_reserve(gb, gb->len + 2)) return 0;
+    gb->data[gb->len++] = (char)ch;
+    gb->data[gb->len] = '\0';
+    return 1;
+}
+
+static int genbuf_write(GenBuf *gb, const void *src, size_t n) {
+    if (!genbuf_reserve(gb, gb->len + n + 1)) return 0;
+    memcpy(gb->data + gb->len, src, n);
+    gb->len += n;
+    gb->data[gb->len] = '\0';
+    return 1;
+}
+
+static void append_tok(GenBuf *gb, Tok *tk, int id) {
+    if (id < 0 || id >= tk->size || is_special(tk, id)) return;
+    const uint8_t *s = (const uint8_t *)tk->vocab[id];
+    int len = tk->vlen[id];
+    for (int i = 0; i < len; ) {
+        int cp, adv;
+        if (s[i] < 0x80) { cp = s[i]; adv = 1; }
+        else if ((s[i] & 0xE0) == 0xC0 && i + 1 < len) {
+            cp = ((s[i] & 0x1F) << 6) | (s[i+1] & 0x3F); adv = 2;
+        } else if ((s[i] & 0xF0) == 0xE0 && i + 2 < len) {
+            cp = ((s[i] & 0x0F) << 12) | ((s[i+1] & 0x3F) << 6) | (s[i+2] & 0x3F); adv = 3;
+        } else { cp = s[i]; adv = 1; }
+        int raw = gpt2_codepoint_to_byte(cp);
+        if (raw >= 0) {
+            if (!genbuf_putc(gb, raw)) return;
+        } else if (!genbuf_write(gb, s + i, (size_t)adv)) {
+            return;
+        }
+        i += adv;
+    }
+}
+
 static void print_tok(Tok *tk, int id) {
     if (id < 0 || id >= tk->size || is_special(tk, id)) return;
     const uint8_t *s = (const uint8_t *)tk->vocab[id];
@@ -876,6 +942,11 @@ static void print_tok(Tok *tk, int id) {
         i += adv;
     }
     fflush(stdout);
+}
+
+static void print_tok_and_append(Tok *tk, int id, GenBuf *gb) {
+    print_tok(tk, id);
+    append_tok(gb, tk, id);
 }
 
 #define PREFILL_BAR_WIDTH 40
@@ -911,9 +982,84 @@ static void decode_progress_done(int n_tokens, double elapsed_sec) {
             n_tokens, elapsed_sec, tps);
 }
 
-static void throughput_summary(int n_prefill, double prefill_sec,
+#define BENCH_LOG_DEFAULT "/tmp/benchmark.log"
+
+typedef struct {
+    const char *model_path;
+    const char *prompt_text;
+    const char *gpu_desc;
+    int   max_new;
+    float temp;
+    float topp;
+    uint64_t seed;
+    int   max_seq;
+    int   n_prefill;
+    int   n_decode;
+    double prefill_sec;
+    double decode_sec;
+    double total_sec;
+    double prefill_tps;
+    double decode_tps;
+    double total_tps;
+    const char *output;
+} BenchLogInfo;
+
+static void write_benchmark_log(const BenchLogInfo *info) {
+    const char *path = getenv("BENCH_LOG_FILE");
+    if (!path || !path[0]) path = BENCH_LOG_DEFAULT;
+
+    time_t now = time(NULL);
+    struct tm tm_local;
+    localtime_r(&now, &tm_local);
+    char timestamp[32];
+    strftime(timestamp, sizeof timestamp, "%Y-%m-%dT%H:%M:%S", &tm_local);
+
+    char hostname[256];
+    hostname[0] = '\0';
+    if (gethostname(hostname, sizeof hostname) != 0)
+        snprintf(hostname, sizeof hostname, "unknown");
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "warning: could not write benchmark log: %s\n", path);
+        return;
+    }
+
+    fprintf(f, "# bonsai-gpu-cuda benchmark log\n");
+    fprintf(f, "timestamp=%s\n", timestamp);
+    fprintf(f, "hostname=%s\n", hostname);
+    fprintf(f, "model=%s\n", info->model_path ? info->model_path : "");
+    fprintf(f, "max_new=%d\n", info->max_new);
+    fprintf(f, "temperature=%.6g\n", (double)info->temp);
+    fprintf(f, "top_p=%.6g\n", (double)info->topp);
+    fprintf(f, "seed=%llu\n", (unsigned long long)info->seed);
+    fprintf(f, "max_seq=%d\n", info->max_seq);
+    fprintf(f, "gpu=%s\n", info->gpu_desc ? info->gpu_desc : "");
+    fprintf(f, "\n");
+    fprintf(f, "prompt_tokens=%d\n", info->n_prefill);
+    fprintf(f, "gen_tokens=%d\n", info->n_decode);
+    fprintf(f, "prefill_sec=%.4f\n", info->prefill_sec);
+    fprintf(f, "decode_sec=%.4f\n", info->decode_sec);
+    fprintf(f, "total_sec=%.4f\n", info->total_sec);
+    fprintf(f, "prefill_tps=%.2f\n", info->prefill_tps);
+    fprintf(f, "decode_tps=%.2f\n", info->decode_tps);
+    fprintf(f, "total_tps=%.2f\n", info->total_tps);
+    fprintf(f, "\n");
+    fprintf(f, "--- prompt ---\n");
+    fprintf(f, "%s\n", info->prompt_text ? info->prompt_text : "");
+    fprintf(f, "--- end prompt ---\n");
+    fprintf(f, "\n");
+    fprintf(f, "--- output ---\n");
+    fprintf(f, "%s\n", info->output ? info->output : "");
+    fprintf(f, "--- end output ---\n");
+    fclose(f);
+}
+
+static void throughput_summary(const BenchLogInfo *meta,
+                             int n_prefill, double prefill_sec,
                              int n_decode, double decode_sec,
-                             double total_sec) {
+                             double total_sec,
+                             const char *output) {
     double prefill_tps = (prefill_sec > 0.0) ? (double)n_prefill / prefill_sec : 0.0;
     double decode_tps  = (decode_sec > 0.0)  ? (double)n_decode / decode_sec  : 0.0;
     int n_total = n_prefill + n_decode;
@@ -922,13 +1068,28 @@ static void throughput_summary(int n_prefill, double prefill_sec,
     fprintf(stderr, "  prefill: %.2f tok/s\n", prefill_tps);
     fprintf(stderr, "  decode:  %.2f tok/s\n", decode_tps);
     fprintf(stderr, "  total:   %.2f tok/s\n", total_tps);
+
+    BenchLogInfo info = *meta;
+    info.n_prefill = n_prefill;
+    info.n_decode = n_decode;
+    info.prefill_sec = prefill_sec;
+    info.decode_sec = decode_sec;
+    info.total_sec = total_sec;
+    info.prefill_tps = prefill_tps;
+    info.decode_tps = decode_tps;
+    info.total_tps = total_tps;
+    info.output = output ? output : "";
+    write_benchmark_log(&info);
 }
 
 static void generate(Model *m, int *prompt, int n_prompt,
-                     int max_new, float temp, float topp, uint64_t seed) {
+                     int max_new, float temp, float topp, uint64_t seed,
+                     const BenchLogInfo *meta) {
     uint64_t rng = seed ? seed : 1;
     int gen = 0;
     double prefill_sec = 0.0;
+    GenBuf gen_out;
+    genbuf_init(&gen_out);
 
     struct timespec t0, t1, t_prefill, t_decode;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -937,6 +1098,7 @@ static void generate(Model *m, int *prompt, int n_prompt,
         if (n_prompt > m->cfg.max_seq) {
             fprintf(stderr, "\n[prompt length %d exceeds max_seq %d]\n",
                 n_prompt, m->cfg.max_seq);
+            genbuf_free(&gen_out);
             return;
         }
         clock_gettime(CLOCK_MONOTONIC, &t_prefill);
@@ -966,7 +1128,7 @@ static void generate(Model *m, int *prompt, int n_prompt,
         int next = sample_token(m->s.logits, m->cfg.vocab_size, temp, topp, &rng);
         if (next == m->tok.eos || next == m->tok.eot) break;
         gen++;
-        print_tok(&m->tok, next);
+        print_tok_and_append(&m->tok, next, &gen_out);
 
         pos = n_prompt + gen_i;
         if (pos >= m->cfg.max_seq) break;
@@ -983,7 +1145,9 @@ static void generate(Model *m, int *prompt, int n_prompt,
     printf("\n\n--- %d prompt tokens + %d generated tokens ---\n", n_prompt, gen);
     printf("--- %.1fs total ---\n", elapsed);
     if (n_prompt > 0 || gen > 0)
-        throughput_summary(n_prompt, prefill_sec, gen, decode_sec, elapsed);
+        throughput_summary(meta, n_prompt, prefill_sec, gen, decode_sec, elapsed,
+                           gen_out.data ? gen_out.data : "");
+    genbuf_free(&gen_out);
 }
 
 int main(int argc, char *argv[]) {
@@ -1001,7 +1165,7 @@ int main(int argc, char *argv[]) {
     }
 
     char *model_path = argv[1];
-    char *prompt     = "Hello";
+    const char *prompt = "Hello";
     int   max_tokens = 256;
     float temp       = 0.6f;
     float topp       = 0.9f;
@@ -1021,6 +1185,9 @@ int main(int argc, char *argv[]) {
      * NVIDIA GPU + cuBLAS。重みは起動時に VRAM へアップロード。
      */
     gpu_print_device_info();
+
+    char gpu_desc[256];
+    gpu_get_device_desc(gpu_desc, sizeof gpu_desc);
 
     printf("Loading %s ...\n", model_path);
 
@@ -1067,7 +1234,18 @@ int main(int argc, char *argv[]) {
     int *prompt_tokens = chat_encode(&model.tok, prompt, &n_prompt_tokens);
     printf("Prompt: \"%s\" (%d tokens)\n\n", prompt, n_prompt_tokens);
 
-    generate(&model, prompt_tokens, n_prompt_tokens, max_tokens, temp, topp, seed);
+    BenchLogInfo bench_meta;
+    memset(&bench_meta, 0, sizeof bench_meta);
+    bench_meta.model_path = model_path;
+    bench_meta.prompt_text = prompt;
+    bench_meta.gpu_desc = gpu_desc;
+    bench_meta.max_new = max_tokens;
+    bench_meta.temp = temp;
+    bench_meta.topp = topp;
+    bench_meta.seed = seed;
+    bench_meta.max_seq = max_seq;
+    generate(&model, prompt_tokens, n_prompt_tokens, max_tokens, temp, topp, seed,
+             &bench_meta);
 
     free(prompt_tokens);
     gpu_model_destroy(model.gpu);

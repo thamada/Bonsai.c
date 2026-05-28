@@ -1146,13 +1146,25 @@ void gpu_copy_logits(GpuModel *gm, float *host_logits)
         (size_t)gm->cfg.vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
 }
 
+void gpu_get_device_desc(char *buf, size_t cap)
+{
+    if (!buf || cap == 0) return;
+    buf[0] = '\0';
+    int dev = 0;
+    cudaDeviceProp prop;
+    if (cudaGetDevice(&dev) != cudaSuccess ||
+        cudaGetDeviceProperties(&prop, dev) != cudaSuccess) {
+        snprintf(buf, cap, "unknown");
+        return;
+    }
+    snprintf(buf, cap, "%s (compute %d.%d, %.1f GB)",
+             prop.name, prop.major, prop.minor,
+             (double)prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0));
+}
+
 void gpu_print_device_info(void)
 {
-    int dev = 0;
-    CUDA_CHECK(cudaGetDevice(&dev));
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, dev));
-    printf("GPU: %s (compute %d.%d, %.1f GB)\n",
-           prop.name, prop.major, prop.minor,
-           (double)prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0));
+    char desc[256];
+    gpu_get_device_desc(desc, sizeof desc);
+    printf("GPU: %s\n", desc);
 }
