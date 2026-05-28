@@ -62,12 +62,13 @@ An 8B model on CPU stays **heavy**. Start with a small `-n` (e.g. `-n 1`) for sm
     ├── cpu-blas/
     │   ├── Makefile
     │   └── main.c
-    ├── gpu-cuda/          # appendix (end of this README)
+    ├── gpu-cuda/          # appendix (end of this README, Q1_0×Q8_0)
+    ├── gpu-cuda-nvfp4/    # appendix (end of this README, NVFP4 + CUTLASS)
     ├── gpu-rocm/          # appendix (end of this README)
     └── gpu-rocm-wmma/     # appendix (Prefill WMMA experiment)
 ```
 
-The reference decoder lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the CPU optimized build is **`bonsai-8b/cpu-blas/`**. GPU builds are optional appendices **`gpu-cuda`** (NVIDIA), **`gpu-rocm`** (AMD), and **`gpu-rocm-wmma`** (AMD, Prefill Attention WMMA experiment)—see the sections at the end of this file.
+The reference decoder lives under **`bonsai-8b/cpu/`**. The parallel variant is **`bonsai-8b/cpu-omp/`**; the CPU optimized build is **`bonsai-8b/cpu-blas/`**. GPU builds are optional appendices **`gpu-cuda`** (NVIDIA, Q1_0), **`gpu-cuda-nvfp4`** (NVIDIA, NVFP4 Tensor Core), **`gpu-rocm`** (AMD), and **`gpu-rocm-wmma`** (AMD, Prefill Attention WMMA experiment)—see the sections at the end of this file.
 
 ## Beginners: what happens during LLM inference?
 
@@ -347,6 +348,7 @@ cd bonsai-8b/cpu-omp && make clean
 cd bonsai-8b/cpu-blas && make clean
 # Appendix GPU builds:
 cd bonsai-8b/gpu-cuda && make clean
+cd bonsai-8b/gpu-cuda-nvfp4 && make clean
 cd bonsai-8b/gpu-rocm && make clean
 cd bonsai-8b/gpu-rocm-wmma && make clean
 ```
@@ -393,7 +395,7 @@ Install `libopenblas-dev` (or your distro’s equivalent) and rebuild in **`cpu-
 ## Out of scope
 
 - Training / fine-tuning  
-- **AMD NPU (e.g. XDNA2)**, **Vulkan, Metal**, and similar (**`gpu-cuda`**, **`gpu-rocm`**, **`gpu-rocm-wmma`** are optional appendix builds; the main focus is the three CPU variants)  
+- **AMD NPU (e.g. XDNA2)**, **Vulkan, Metal**, and similar (**`gpu-cuda`**, **`gpu-cuda-nvfp4`**, **`gpu-rocm`**, **`gpu-rocm-wmma`** are optional appendix builds; the main focus is the three CPU variants)  
 - Batch inference tuning (GPU appendix prefill batching is for faster decode, not server batching)  
 - Image input  
 - Server or Web API packaging  
@@ -407,13 +409,13 @@ The goal is to **understand, experiment with, and adapt** **Bonsai-8B-Q1_0** (GG
 - `doc/design.md`  
 - `doc/ChangeLog`  
 
-If something fails, check **`bonsai-8b/Makefile`** (**`model` only**) and per-subdirectory Makefiles (`cpu/`, `cpu-blas/`, `gpu-cuda/`, etc.), plus the model path you pass at runtime.
+If something fails, check **`bonsai-8b/Makefile`** (**`model` only**) and per-subdirectory Makefiles (`cpu/`, `cpu-blas/`, `gpu-cuda/`, `gpu-cuda-nvfp4/`, etc.), plus the model path you pass at runtime.
 
 ---
 
 ## NVIDIA CUDA implementation (`gpu-cuda`)
 
-**`bonsai-8b/gpu-cuda/` is an appendix outside this repo’s goals** (single C source, minimal dependencies). It splits across `main.c` + `kernels.cu` + `gpu.h` (optionally `fp4_bonsai.cu` / `fp4_gemm.cu` + CUTLASS) and requires **CUDA Toolkit, an NVIDIA driver, and a physical GPU**. The reference implementation to read first is **`cpu/main.c`**.
+**`bonsai-8b/gpu-cuda/` is an appendix outside this repo’s goals** (single C source, minimal dependencies). It uses `main.c` + `kernels.cu` + `gpu.h` with **Q1_0×Q8_0 GEMV only** (no NVFP4 path). It requires **CUDA Toolkit, an NVIDIA driver, and a physical GPU**. For Blackwell **NVFP4 Tensor Core**, see the separate appendix **`gpu-cuda-nvfp4/`**. The reference implementation to read first is **`cpu/main.c`**.
 
 It is bundled only because the author **wanted to see how fast CUDA could go**. It does not complement the project’s purpose and is not an official feature for readers. It is easy to misread as part of the main project, so **`gpu-cuda/` is planned to move to a separate repository**. First-time readers can **ignore it**.
 
@@ -426,10 +428,7 @@ bonsai-8b/gpu-cuda/
 ├── Makefile
 ├── main.c
 ├── kernels.cu
-├── gpu.h
-├── fp4_bonsai.cu / fp4_bonsai.h   # NVFP4 bridge (when BONSAI_FP4=1)
-├── fp4_gemm.cu / fp4_gemm.h       # CUTLASS block-scaled NVFP4 GEMM
-└── third_party/cutlass/           # fetched by make cutlass (FP4 builds)
+└── gpu.h
 ```
 
 ### Technical overview
@@ -442,7 +441,7 @@ Uploaded from host (mmap’d GGUF) via **H2D copy** at startup:
 
 | Kind | Contents | Format |
 |---|---|---|
-| Weights | `token_embd`, per-layer `wq/wk/wv/wo/gate/up/down`, `output` | Q1_0 (g128). With **`BONSAI_FP4=1`** builds only, linear layers are converted at startup into a **GPU-resident NVFP4 + block-scale cache** (below) |
+| Weights | `token_embd`, per-layer `wq/wk/wv/wo/gate/up/down`, `output` | Q1_0 (g128) |
 | Weights | `attn_norm`, `q_norm`, `k_norm`, `ffn_norm`, `output_norm` | F32 |
 | KV cache | `kc`, `vc` | F32, `n_layers × max_seq × kv_dim` |
 | Decode activations | `x`, `xb`, `xb2`, `q`, `k`, `v`, `hb`, `hb2`, `logits`, `q8` | F32 / Q8_0 |
@@ -494,82 +493,15 @@ FFN after attention also uses batch kernels; hidden state lives in `x_batch` as 
 
 **LM head for the last token only:** logits are not computed for every position—only `x_batch[(n_tokens-1) * dim]` goes through `rmsnorm_kernel` → `gpu_mm` to produce `logits` (for the first decode token).
 
-#### Q1_0 GEMV (`gpu_mm` / `gpu_mm_batch`) — default
+#### Q1_0 GEMV (`gpu_mm` / `gpu_mm_batch`)
 
-Same approach as **`cpu-blas`**. Weights stay **Q1_0 in VRAM** (no upfront dequant). Both **`make run`** (Blackwell **`sm_120a`**, **`BONSAI_FP4=0`**) and **`make run.no-fp4`** (**`BONSAI_FP4=0`**, **`make build` GPU auto-detect**) use this path. **RTX 5090-class GPUs need native `sm_120`** (PTX **`compute_86` JIT breaks inference**). Only a build with **`BONSAI_FP4=1`** switches linear layers to NVFP4 in the next section.
+Same approach as **`cpu-blas`**. Weights stay **Q1_0 in VRAM** (no upfront dequant). **`make run`** (Blackwell **`sm_120a`**) and **`make build`** (**`nvidia-smi` GPU auto-detect**) use this path. **RTX 5090-class GPUs need native `sm_120` / `sm_120a`** (PTX **`compute_86` JIT breaks inference**). For **NVFP4**, see the **`gpu-cuda-nvfp4`** section below.
 
 1. Quantize the input vector (or each batch row) to Q8_0 (group size 32) with **`quantize_q8_0_kernel`**.
 2. Run **`mm_q1_0_kernel`** / **`mm_q1_0_batch_kernel`**: `vec_dot_q1_0_q8_0` — dot product of a Q1_0 weight row and Q8_0 activations; 1-bit sign bits combined with Q8_0 int8 products, restored with FP16 scales.
 3. Each Q1_0 block (128 elements) pairs with 4 Q8_0 blocks.
 
 Decode: 256 threads/block parallel over output dimension `d`. Prefill: parallel over `n_tokens × d` output elements.
-
-#### NVFP4 + CUTLASS (Blackwell, manual `BONSAI_FP4=1`)
-
-**What NVFP4 is (short):** A **4-bit floating-point** format for NVIDIA Blackwell Tensor Cores, used with **block scaling**: each value is rounded to **4-bit E2M1**, and every **16 elements** (`SF_VEC_SIZE`) share one **8-bit UE4M3** scale. Roughly, `value ≈ scale × decoded_E2M1`.
-
-**E2M1 (one value, 4 bits)** — 1 sign bit + 2 exponent bits + 1 mantissa bit (same encoding as CUTLASS `float_e2m1_t`). **Only eight positive magnitudes** can be stored (NVIDIA spec; matches the lookup table in `fp4_gemm.cu`):
-
-| code (3 bit) | \|value\| |
-|:---:|:---:|
-| 0 | 0 |
-| 1 | 0.5 |
-| 2 | 1.0 |
-| 3 | 1.5 |
-| 4 | 2.0 |
-| 5 | 3.0 |
-| 6 | 4.0 |
-| 7 | 6.0 |
-
-Bit 3 is the sign (0 = non-negative, 1 = negative). **0.75 is not one of these eight levels** — it is a **quantization boundary** (midpoint between neighbors). [NVIDIA Model-Optimizer](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/quantization/qtensor/nvfp4_tensor.py) uses boundaries such as `0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5` when rounding floats to the nearest E2M1 code. A real value like `0.75` is approximated as `scale ×` the nearest table entry after block scaling.
-
-Bit layout (`d_float_to_fp4` in `fp4_gemm.cu`):
-
-```text
-  bit:   3    2 1 0
-        +---+-------+
-        | S | code  |   S: sign (0 = non-negative, 1 = negative) ／ code: 3-bit index in the table above
-        +---+-------+
-```
-
-Two values packed per byte (low nibble = even index):
-
-```text
-  byte:  7 6 5 4 | 3 2 1 0
-        +---------+---------+
-        | fp4[i+1]| fp4[i]  |
-        +---------+---------+
-```
-
-**UE4M3 (block scale, 8 bits / 16 elements)** — unsigned, 4-bit exponent (bias 7) + 3-bit mantissa. The scale is derived from the block max absolute value; each E2M1 is normalized by that scale before quantization (CUTLASS block-scaled NVFP4 layout).
-
-```text
-  bit:   7 6 5 4   3 2 1 0
-        +---------+-------+
-        |  exp(4) | mant(3)|   approximate range in code comments: [~0.002, 480]
-        +---------+-------+
-```
-
-GGUF weights stay **Q1_0 (1-bit + FP16 scale)** on disk; this project **dequantizes to BF16 at startup**, then builds an **NVFP4 GPU cache** for GEMM (the GGUF file is not stored as NVFP4).
-
-Active only when built with **`BONSAI_FP4=1`** (**`make run` / `make blackwell` default to `BONSAI_FP4=0`** — see the manual build example under **Build** for NVFP4). **`main.c` does not call NVFP4 directly** — GGUF loading, `generate`, and sampling are unchanged; only **linear-layer GEMV/GEMM inside `kernels.cu`** switches to FP4 Tensor Core processing. Embedding, RMSNorm, RoPE, Flash Attention, SwiGLU, and the KV cache are unchanged.
-
-| File | Role |
-|---|---|
-| `fp4_gemm.cu` | [CUTLASS](https://github.com/NVIDIA/cutlass) **SM120 block-scaled NVFP4 GEMM** (based on Example 79a). Buffers are allocated at startup via **`fp4_gemm_prealloc(max_M,max_N,max_K)`**. **`fp4_gemm_run_cached`** runs only after prealloc and within shape limits. |
-| `fp4_bonsai.cu` | Bonsai bridge: **Q1_0 weights** on the host are restored to BF16, **quantized once at startup** into an NVFP4 cache; at inference time handles **F32 activations ↔ BF16 ↔ CUTLASS GEMM ↔ F32 output**. |
-| `kernels.cu` | With `#ifdef BONSAI_FP4`, weight upload in `gpu_model_create` and dispatch in `gpu_mm` / `gpu_mm_batch` to the FP4 path (`gpu_mm_fp4` → `fp4_bonsai_mm`). |
-
-**Where it is used (linear layers only):** per-layer **`wq` / `wk` / `wv` / `wo` / `gate` / `up` / `down`** and final **`output` (LM head)**. In decode, that is steps 3, 8, 9, and 10; in prefill, the `gpu_mm_batch` rows in the table above.
-
-**How it works:**
-
-1. **Build** — `make cutlass` fetches `third_party/cutlass` and links `fp4_gemm.o` / `fp4_bonsai.o`. GPU code must be native **`sm_120a`** (PTX JIT cannot use Tensor Core FP4).
-2. **Startup (`gpu_model_create`)** — `fp4_bonsai_init` allocates CUTLASS workspace. Each layer’s Q1_0 tensor is converted via `fp4_bonsai_weight_from_q1_host` into a **GPU-resident FP4 weight cache** (packed NVFP4 + scales; `M`/`N`/`K` padded to **multiples of 128**).
-3. **Inference (`gpu_forward` / `gpu_forward_prefill`)** — `gpu_mm` / `gpu_mm_batch` call `fp4_bonsai_mm`. Activations (F32, `M` rows × `n` cols) are uploaded as BF16, **quantized to NVFP4 on the fly**, and multiplied with **cached FP4 weights** via CUTLASS GEMM. Results are written back to F32 `o` / `logits` buffers; subsequent norm / attention kernels match the Q1_0 build.
-4. **Check** — stderr at startup should show `GPU: FP4 Tensor Core path enabled (NVFP4, CUTLASS sm_120)` when the FP4 path is active.
-
-With the default **`make run`** and **`make run.no-fp4`**, this section does not apply; only the Q1_0 GEMV path above (Q8_0 activations + `mm_q1_0_*` kernels) is used.
 
 #### Flash Attention (GQA, online softmax)
 
@@ -609,30 +541,19 @@ sudo apt install -y nvidia-cuda-toolkit   # or NVIDIA’s official CUDA Toolkit
 
 | Goal | Command (`bonsai-8b/gpu-cuda/`) | Notes |
 |---|---|---|
-| Q1_0, no FP4 (GPU auto-detect) | `make build` / `make run.no-fp4` | **`nvidia-smi`** picks **`CUDA_GENCODE`** (RTX 50 → **`sm_120`**, etc.) |
-| Blackwell + Q1_0 (default) | `make` / `make run` | CUDA 13 + native **`sm_120a`** + **`BONSAI_FP4=0`** (first run may need **sudo**; later runs **skip apt**) |
-| Blackwell + NVFP4 | Manual build below | **`make cutlass`** + **`BONSAI_FP4=1`** |
+| Build with GPU auto-detect | `make build` | **`nvidia-smi`** picks **`CUDA_GENCODE`** (RTX 50 → **`sm_120`**, etc.) |
+| Blackwell + Q1_0 (default) | `make` / `make run` | CUDA 13 + native **`sm_120a`** (first run may need **sudo**; later runs **skip apt**) |
 
 ```bash
 cd bonsai-8b/gpu-cuda
 make run              # default: blackwell (sm_120a, Q1_0) then inference (skips apt if CUDA 13 present)
-# make run.no-fp4     # build (GPU auto-detect, no FP4) then inference
-```
-
-Optional NVFP4 on Blackwell:
-
-```bash
-cd bonsai-8b/gpu-cuda
-make cutlass
-make build CUDA_GENCODE=arch=compute_120a,code=sm_120a FA_BR=32 BONSAI_FP4=1 NVCC=/usr/local/cuda/bin/nvcc
-./bonsai-gpu-cuda ../Bonsai-8B-Q1_0.gguf -p "Hello"
 ```
 
 Produces **`bonsai-gpu-cuda`**.
 
-After changing **`CUDA_GENCODE`**, **`BONSAI_FP4`**, or **`FA_BR`**, the Makefile uses **`.build_config.stamp`** (contents `CUDA_GENCODE|fp4=…|fa=…`) to force **`kernels.o` / `fp4_*.o`** to rebuild so stale objects are not reused. **`make clean`** removes the stamp as well.
+After changing **`CUDA_GENCODE`** or **`FA_BR`**, the Makefile uses **`.build_config.stamp`** to force **`kernels.o`** to rebuild. **`make clean`** removes the stamp as well.
 
-**`make build`** / **`run.no-fp4`** auto-select **`CUDA_GENCODE`** / **`FA_BR`** from **`nvidia-smi`** (build log shows `GPU_CCAP` / `CUDA_GENCODE`). Override example:
+**`make build`** auto-selects **`CUDA_GENCODE`** / **`FA_BR`** from **`nvidia-smi`** (build log shows `GPU_CCAP` / `CUDA_GENCODE`). Override example:
 
 ```bash
 make build CUDA_GENCODE=arch=compute_90,code=sm_90
@@ -643,7 +564,6 @@ make build CUDA_GENCODE=arch=compute_90,code=sm_90
 ```bash
 cd bonsai-8b/gpu-cuda
 make run PROMPT="Hello"          # Blackwell sm_120a + Q1_0 (default)
-# make run.no-fp4 PROMPT="Hello" # GPU auto-detect + Q1_0 (no FP4)
 ```
 
 CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
@@ -659,54 +579,107 @@ CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
 | GPU | NVIDIA GeForce RTX 5090 (31 GiB VRAM) |
 | OS | Linux |
 | Model | `Bonsai-8B-Q1_0.gguf` (uploaded to VRAM at startup) |
-| Command | **`make run`** (**`sm_120a`**, Q1_0) or **`make run.no-fp4`** (GPU auto-detect, Q1_0). FP4 table is from manual **`BONSAI_FP4=1`** build |
+| Command | **`make run`** (**`sm_120a`**, Q1_0) |
 | Workload | Same as CPU table above (prefill 18 + decode 16 tokens) |
 | Repro | One warmup per configuration, then representative of three runs (prefill / decode from stderr `Prefill complete` / `Decode complete` lines) |
 
-#### FP4 Tensor Core enabled (manual `BONSAI_FP4=1`)
+#### Q1_0 GPU (Blackwell native, `make run`)
 
-Blackwell (RTX 50 series): **CUDA 13**, native **`sm_120a`**, **`BONSAI_FP4=1`** (NVFP4 + CUTLASS), **`FA_BR=32`**. **Default `make run` does not enable FP4** (see Q1_0 tables below).
-
-| Binary | Prefill tok/s | Decode time | Decode throughput | Notes |
-|---|---:|---:|---:|---|
-| `gpu-cuda/bonsai-gpu-cuda` | **~1365** | 0.18 s | **~90.4 tok/s** | stderr shows `GPU: FP4 Tensor Core path enabled` (measured 2026-05-21) |
-
-#### Q1_0 GPU (Blackwell native, `make run` / `make run.no-fp4`)
-
-**CUDA 13**, **`sm_120` / `sm_120a`**, **`BONSAI_FP4=0`**, **`FA_BR=32`**. `-p "Hello, how are you?"` (measured 2026-05-28).
+**CUDA 13**, **`sm_120a`**, **`FA_BR=32`**. `-p "Hello, how are you?"` (measured 2026-05-28).
 
 | Binary | Prefill tok/s | Decode tok/s | Notes |
 |---|---:|---:|---|
 | `gpu-cuda/bonsai-gpu-cuda` | **~312** | **~47** | **`make run`** (**`sm_120a`**) |
 
-**PTX `compute_86` JIT** is **not supported on RTX 5090** (garbled output). The 2026-05-21 PTX table is for Ampere/Ada reference only.
+**PTX `compute_86` JIT** is **not supported on RTX 5090** (garbled output).
 
-With the same prompt and `-t 0`, **Q1_0 configurations** matched **`cpu-blas`** output. In the 2026-05-21 runs, **manual `BONSAI_FP4=1`** gave decode **~1.9×** and prefill **~4.7×** higher tok/s than Q1_0 on the same GPU.
+With the same prompt and `-t 0`, **Q1_0 configurations** matched **`cpu-blas`** output. **NVFP4** numbers are in the **`gpu-cuda-nvfp4`** section below.
 
 ### Troubleshooting (CUDA build)
 
 **CUDA / `nvcc` not found:** Install CUDA Toolkit and an NVIDIA driver, then run **`make build`** or **`make run`** (Blackwell) in **`gpu-cuda`**. **RTX 50 series** need **CUDA 13** and native **`sm_120` / `sm_120a`** (do **not** use PTX **`compute_86`**). **`make build`** auto-selects **`CUDA_GENCODE`** via **`nvidia-smi`**.
 
-**Garbled output / `flash_attn … unsupported toolchain`:** On Blackwell, avoid PTX JIT (`CUDA_GENCODE=arch=compute_86,code=compute_86`). Rebuild with **`make clean && make run`** or **`make run.no-fp4`**.
+**Garbled output / `flash_attn … unsupported toolchain`:** On Blackwell, avoid PTX JIT (`CUDA_GENCODE=arch=compute_86,code=compute_86`). Rebuild with **`make clean && make run`**.
 
 **`make run` runs apt every time:** If CUDA 13 is already installed, later runs skip apt. Force reinstall: **`make blackwell FORCE_CUDA_APT=1`**.
 
 If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
-**Clean:** run **`make clean`** in **`bonsai-8b/gpu-cuda`**, **`bonsai-8b/gpu-rocm`**, or **`bonsai-8b/gpu-rocm-wmma`**.
+**Clean:** run **`make clean`** in **`bonsai-8b/gpu-cuda`**, **`bonsai-8b/gpu-cuda-nvfp4`**, **`bonsai-8b/gpu-rocm`**, or **`bonsai-8b/gpu-rocm-wmma`**.
 
 ### Source files to read
 
-6. `bonsai-8b/gpu-cuda/main.c` — host side (GGUF, tokenizer, `generate`, sampling); does not switch NVFP4  
-7. `bonsai-8b/gpu-cuda/kernels.cu` — forward pass and `gpu_mm*` dispatch (to `fp4_bonsai` when FP4 is enabled)  
-8. `bonsai-8b/gpu-cuda/fp4_bonsai.cu` / `fp4_gemm.cu` — Q1_0 ↔ NVFP4 bridge and CUTLASS GEMM (when `BONSAI_FP4=1`)  
-9. `bonsai-8b/gpu-cuda/gpu.h` — C API (`gpu_forward_prefill`, etc.)  
+6. `bonsai-8b/gpu-cuda/main.c` — host side (GGUF, tokenizer, `generate`, sampling)  
+7. `bonsai-8b/gpu-cuda/kernels.cu` — forward pass, Q1_0 GEMV, Flash Attention  
+8. `bonsai-8b/gpu-cuda/gpu.h` — C API (`gpu_forward_prefill`, etc.)  
+
+---
+
+## NVIDIA CUDA NVFP4 implementation (`gpu-cuda-nvfp4`)
+
+**`bonsai-8b/gpu-cuda-nvfp4/`** is a separate appendix with the same GGUF, CLI, and prefill/decode split as **`gpu-cuda`**, but **linear layers** use **NVFP4 Tensor Core + CUTLASS**. Binary: **`bonsai-gpu-cuda-nvfp4`**. Requires **CUTLASS v4.5.1** (older v3.9.0 fails GEMM `initialize` on RTX 5090). See **`doc/design.md`** (“Runtime behavior (`gpu-cuda-nvfp4`)”) for the full spec.
+
+### Directory layout
+
+```text
+bonsai-8b/gpu-cuda-nvfp4/
+├── Makefile
+├── main.c
+├── kernels.cu          # linear layers always gpu_mm_fp4 → fp4_bonsai_mm
+├── gpu.h
+├── fp4_bonsai.cu / fp4_bonsai.h
+├── fp4_gemm.cu / fp4_gemm.h
+└── third_party/cutlass/   # make cutlass (CUTLASS_TAG=v4.5.1)
+```
+
+### NVFP4 + CUTLASS (summary)
+
+**NVFP4:** 4-bit floating format for Blackwell Tensor Cores. Values are **E2M1** (4 bit); every **16 elements** share one **UE4M3** scale (8 bit). GGUF stays **Q1_0**; at startup weights are **restored to BF16 → NVFP4 cache** for GEMM.
+
+| File | Role |
+|---|---|
+| `fp4_gemm.cu` | CUTLASS **SM120 block-scaled NVFP4 GEMM**. Startup **`fp4_gemm_prealloc`**. **`fp4_gemm_init(M,N,K)`** before each GEMM |
+| `fp4_bonsai.cu` | Q1_0 → NVFP4 weight cache, F32 ↔ BF16 ↔ GEMM. Activation padding uses separate **`M_act` / `M_pad`** |
+| `kernels.cu` | Always **`fp4_bonsai_mm`** (no `#ifdef`) |
+
+**Layers:** `wq` through `down` and `output` (LM head). **`M`/`N`/`K` must be multiples of 128**. stderr should show `GPU: FP4 Tensor Core path enabled` at startup.
+
+Full E2M1 tables and bit diagrams match the former **`gpu-cuda`** appendix (also in **`doc/design.md`**).
+
+### Build and run
+
+| Goal | Command (`bonsai-8b/gpu-cuda-nvfp4/`) |
+|---|---|
+| Fetch CUTLASS | `make cutlass` |
+| Blackwell + NVFP4 (default) | `make` / `make run` |
+
+```bash
+cd bonsai-8b/gpu-cuda-nvfp4
+make cutlass            # first time or after CUTLASS update
+make run                # blackwell → sm_120a + NVFP4
+./bonsai-gpu-cuda-nvfp4 ../Bonsai-8B-Q1_0.gguf -p "Hello"
+```
+
+After a CUTLASS upgrade: `rm -rf third_party/cutlass && make cutlass`.
+
+### Reference benchmark (NVFP4, RTX 5090)
+
+| Binary | Prefill tok/s | Decode tok/s | Notes |
+|---|---:|---:|---|
+| `gpu-cuda-nvfp4/bonsai-gpu-cuda-nvfp4` | **~1365** | **~90.4** | Short prompt, `-n 16` (2026-05-21) |
+| `gpu-cuda-nvfp4/bonsai-gpu-cuda-nvfp4` | **~1767** | **~65** | **`make run`**, `-p "Hello, how are you?"` (2026-05-28) |
+
+In 2026-05-21 runs, NVFP4 was about **~1.9×** decode and **~4.7×** prefill tok/s vs Q1_0 on the same GPU.
+
+### Troubleshooting (NVFP4)
+
+**`fp4_gemm_run_cached: initialize: Error Internal`:** Re-fetch **CUTLASS v4.5.1** (`rm -rf third_party/cutlass && make cutlass`). Confirm **CUDA 13** and native **`sm_120a`**.
 
 ---
 
 ## AMD ROCm / HIP implementation (`gpu-rocm`)
 
-**`bonsai-8b/gpu-rocm/` is also an appendix outside this repo’s main goals** (single C source, minimal dependencies). It uses `main.c` + `kernels.hip` + `gpu.h` (**C API based on `gpu-cuda/gpu.h` with `gpu_get_device_desc` added**) and requires **ROCm (`hipcc`)**, an **AMD GPU driver**, and a **physical GPU**. **hipBLAS is not required** (linear layers use custom Q1_0×Q8_0 HIP kernels). **There is no NVFP4 path** (same algorithm family as **`gpu-cuda` Q1_0** — **`make run`** / **`make run.no-fp4`**). Use **`make log` / `make log.push`** to record benchmark history in **`gpu-rocm/Makefile`**.
+**`bonsai-8b/gpu-rocm/` is also an appendix outside this repo’s main goals** (single C source, minimal dependencies). It uses `main.c` + `kernels.hip` + `gpu.h` (**C API based on `gpu-cuda/gpu.h` with `gpu_get_device_desc` added**) and requires **ROCm (`hipcc`)**, an **AMD GPU driver**, and a **physical GPU**. **hipBLAS is not required** (linear layers use custom Q1_0×Q8_0 HIP kernels). **There is no NVFP4 path** (same algorithm family as **`gpu-cuda` Q1_0**). Use **`make log` / `make log.push`** to record benchmark history in **`gpu-rocm/Makefile`**.
 
 It exists so the author could **try the same forward on AMD GPUs**. First-time readers can **ignore it**. See **`doc/design.md`** (“Build and run (GPU ROCm)”, “Runtime behavior (`gpu-rocm`)”) for the full spec.
 

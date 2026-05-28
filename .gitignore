@@ -14,8 +14,10 @@ bonsai-8b/cpu-blas/bonsai-cpu-blas
 bonsai-8b/gpu-cuda/bonsai-gpu-cuda
 bonsai-8b/gpu-cuda/*.o
 bonsai-8b/gpu-cuda/.build_config.stamp
-bonsai-8b/gpu-cuda/.stamp_bonsai_fp4_*
-bonsai-8b/gpu-cuda/third_party/
+bonsai-8b/gpu-cuda-nvfp4/bonsai-gpu-cuda-nvfp4
+bonsai-8b/gpu-cuda-nvfp4/*.o
+bonsai-8b/gpu-cuda-nvfp4/.build_config.stamp
+bonsai-8b/gpu-cuda-nvfp4/third_party/
 bonsai-8b/gpu-rocm/bonsai-gpu-rocm
 bonsai-8b/gpu-rocm/*.o
 bonsai-8b/gpu-rocm-wmma/bonsai-gpu-rocm-wmma
