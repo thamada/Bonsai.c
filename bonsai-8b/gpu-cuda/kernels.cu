@@ -1052,6 +1052,90 @@ void gpu_copy_logits(GpuModel *gm, float *host_logits)
         (size_t)gm->cfg.vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
 }
 
+static size_t dev_layer_sum_bytes(const DevLayerBuf *lb)
+{
+    if (!lb || !lb->bytes) return 0;
+    size_t sum = 0;
+    for (int l = 0; l < lb->n_layers; l++)
+        sum += lb->bytes[l];
+    return sum;
+}
+
+void gpu_model_vram_profile(const GpuModel *gm, GpuVramProfile *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    if (!gm) return;
+
+    const int L = gm->cfg.n_layers;
+    const int dim = gm->cfg.dim;
+    const int hidden = gm->cfg.hidden_dim;
+    const int kv_dim = gm->cfg.kv_dim;
+    const int vocab = gm->cfg.vocab_size;
+    const int max_seq = gm->cfg.max_seq;
+    const int hd = gm->cfg.head_dim;
+    const int n_rot = gm->cfg.n_rot > 0 ? gm->cfg.n_rot : hd;
+
+    out->weights_q1_embd_bytes = gm->embd.bytes;
+
+    out->weights_f32_norm_bytes =
+        dev_layer_sum_bytes(&gm->norm_att) +
+        dev_layer_sum_bytes(&gm->q_norm) +
+        dev_layer_sum_bytes(&gm->k_norm) +
+        dev_layer_sum_bytes(&gm->norm_ffn) +
+        gm->norm_out.bytes;
+
+    out->weights_q1_linear_bytes =
+        dev_layer_sum_bytes(&gm->wq) +
+        dev_layer_sum_bytes(&gm->wk) +
+        dev_layer_sum_bytes(&gm->wv) +
+        dev_layer_sum_bytes(&gm->wo) +
+        dev_layer_sum_bytes(&gm->gate) +
+        dev_layer_sum_bytes(&gm->up) +
+        dev_layer_sum_bytes(&gm->down) +
+        gm->out.bytes;
+
+    out->kv_cache_bytes =
+        (size_t)L * (size_t)max_seq * (size_t)kv_dim * sizeof(float) * 2;
+
+    out->decode_activations_bytes =
+        (size_t)dim * sizeof(float) * 3 +
+        (size_t)hidden * sizeof(float) * 2 +
+        (size_t)dim * sizeof(float) +
+        (size_t)kv_dim * sizeof(float) * 2 +
+        (size_t)vocab * sizeof(float) +
+        (size_t)gm->q8_nb * sizeof(GpuBlockQ8_0) +
+        (size_t)n_rot * 2 * sizeof(float);
+
+    {
+        size_t bc = (size_t)max_seq;
+        out->prefill_batch_bytes =
+            bc * (size_t)dim * sizeof(float) * 3 +
+            bc * (size_t)dim * sizeof(float) * 2 +
+            bc * (size_t)kv_dim * sizeof(float) * 2 +
+            bc * (size_t)hidden * sizeof(float) * 2 +
+            bc * (size_t)gm->q8_nb * sizeof(GpuBlockQ8_0) +
+            bc * (size_t)n_rot * 2 * sizeof(float) +
+            bc * sizeof(int);
+    }
+
+    out->total_bytes =
+        out->weights_q1_embd_bytes +
+        out->weights_f32_norm_bytes +
+        out->weights_q1_linear_bytes +
+        out->kv_cache_bytes +
+        out->decode_activations_bytes +
+        out->prefill_batch_bytes;
+
+    size_t free_bytes = 0, total_bytes = 0;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess) {
+        out->device_total_bytes = total_bytes;
+        if (total_bytes >= free_bytes)
+            out->device_used_bytes = total_bytes - free_bytes;
+    }
+}
+
 void gpu_get_device_desc(char *buf, size_t cap)
 {
     if (!buf || cap == 0) return;

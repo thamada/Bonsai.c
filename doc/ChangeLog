@@ -4,6 +4,22 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-28 21:04:32
+
+**`README.md`**: **`gpu-cuda`** 付録に **VRAM プロファイル**・**`make log` / `make log.push`**・長プロンプトベンチ表・**VRAM 内訳表**（2026-05-28 20:51 計測・理論 **1342.94 MiB**）を追加。**`gpu-cuda-nvfp4`** 付録に **VRAM 内訳表**（2026-05-28 20:30 計測・理論 **5698.87 MiB**）を追加。
+
+**`doc/design.md`**: **GPU CUDA 表**に Q1_0 / NVFP4 **VRAM 内訳（参考）** 表を追加。制約（理論 VRAM 合計）・ドキュメント間役割・README 一行説明を追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
+## 2026-05-28 20:55:33
+
+**`bonsai-8b/gpu-cuda/`**: **VRAM プロファイル**を追加（**`gpu-cuda-nvfp4`** と同趣旨、Q1_0 向けフィールド）。**`gpu.h`**: **`GpuVramProfile`**（**`weights_q1_linear_bytes`** 等。NVFP4 版の **`weights_fp4_bytes`** / **`fp4_gemm_scratch_bytes`** は無し）と **`gpu_model_vram_profile`**。**`kernels.cu`**: 上記 API 実装。**`main.c`**: 推論終了時 **`write_benchmark_log`** に **`vram_total`**・**`vram_device_*`**・**`[vram_breakdown]`**（**`vram_weights_q1_linear`** 含む）を追記。**`make log.push`** 実測 1 件を **`BENCH_LOG`** に追記（130+128 トークン: prefill **413.24** / decode **43.17** / total **78.66** tok/s）。
+
+**`doc/design.md`**: **`gpu-cuda`** VRAM プロファイル・長プロンプトベンチ表・ビルド手順（**`log.push`**）・実行挙動・制約を追随。**`gpu-cuda-nvfp4/gpu.h`** の **`GpuVramProfile`** 差分を明記。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-28 20:35:37
 
 **`bonsai-8b/gpu-cuda-nvfp4/`**: **VRAM プロファイル**を追加。**`gpu.h`**: **`GpuVramProfile`**（重み Q1_0 embedding / F32 norm / NVFP4 線形層 / KV / decode 活性 / prefill バッチ / FP4 GEMM スクラッチ / デバイス使用量）と **`gpu_model_vram_profile`** API。**`kernels.cu`**: 上記 API 実装（**`fp4_weight_cache_vram_bytes`** / **`fp4_bonsai_vram_bytes`** / **`fp4_gemm_vram_bytes`** を集計）。**`fp4_bonsai.cu`** / **`fp4_gemm.cu`**: 各 VRAM バイト数ヘルパ。**`main.c`**: 推論終了時 **`write_benchmark_log`** に **`vram_total`**・**`vram_device_*`**（**`cudaMemGetInfo`**）・**`[vram_breakdown]`** セクション（各カテゴリ bytes + MiB）を追記。**`make log.push`** 実測 2 件を **`BENCH_LOG`** に追記（130+128 トークン: prefill **5762.22** / **5757.93**、decode **64.14** / **64.20**、total **127.84** / **127.96** tok/s）。
