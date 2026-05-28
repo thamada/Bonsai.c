@@ -617,7 +617,7 @@ If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
 ## NVIDIA CUDA NVFP4 implementation (`gpu-cuda-nvfp4`)
 
-**`bonsai-8b/gpu-cuda-nvfp4/`** is a separate appendix with the same GGUF, CLI, and prefill/decode split as **`gpu-cuda`**, but **linear layers** use **NVFP4 Tensor Core + CUTLASS**. Binary: **`bonsai-gpu-cuda-nvfp4`**. Requires **CUTLASS v4.5.1** (older v3.9.0 fails GEMM `initialize` on RTX 5090). See **`doc/design.md`** (“Runtime behavior (`gpu-cuda-nvfp4`)”) for the full spec.
+**`bonsai-8b/gpu-cuda-nvfp4/`** is a separate appendix with the same GGUF, CLI, and prefill/decode split as **`gpu-cuda`**, but **linear layers** use **NVFP4 Tensor Core + CUTLASS**. Binary: **`bonsai-gpu-cuda-nvfp4`**. Requires **CUTLASS v4.5.1** (older v3.9.0 fails GEMM `initialize` on RTX 5090). Use **`make log` / `make log.push`** to record benchmark history in **`gpu-cuda-nvfp4/Makefile`**. See **`doc/design.md`** (“Runtime behavior (`gpu-cuda-nvfp4`)”) for the full spec.
 
 ### Directory layout
 
@@ -652,6 +652,8 @@ Full E2M1 tables and bit diagrams match the former **`gpu-cuda`** appendix (also
 |---|---|
 | Fetch CUTLASS | `make cutlass` |
 | Blackwell + NVFP4 (default) | `make` / `make run` |
+| Show benchmark history | `make log` |
+| Run benchmark and append history | `make log.push` (e.g. `make log.push BENCH_N=64`) |
 
 ```bash
 cd bonsai-8b/gpu-cuda-nvfp4
@@ -662,14 +664,41 @@ make run                # blackwell → sm_120a + NVFP4
 
 After a CUTLASS upgrade: `rm -rf third_party/cutlass && make cutlass`.
 
+### Benchmark logging (`make log` / `make log.push`)
+
+Same idea as **`gpu-rocm`**: run a **long prompt** (~**130** tokens after ChatML) + **128** decode tokens and append results to **`gpu-cuda-nvfp4/Makefile`**. Column 2 is **`GPU_LABEL`** (compute capability from **`nvidia-smi`**, e.g. **`sm_120`**).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BENCH_PROMPT` | Long English text (in Makefile) | Benchmark prompt |
+| `BENCH_N` | `128` | Max generated tokens (`-n`) |
+| `BENCH_SEED` | `42` | RNG seed (`-s`) |
+| `BENCH_LOG_FILE` | `/tmp/benchmark.log` | key=value log path |
+
+```bash
+cd bonsai-8b/gpu-cuda-nvfp4
+make log.push          # build → benchmark → append one line to Makefile
+make log               # print BENCH_LOG as a table
+```
+
+**Note:** **`make log.push` modifies `gpu-cuda-nvfp4/Makefile`**. Check **`git diff`** before committing. Table **`total_tps`** is **inference only** (VRAM weight upload excluded).
+
 ### Reference benchmark (NVFP4, RTX 5090)
 
-| Binary | Prefill tok/s | Decode tok/s | Notes |
-|---|---:|---:|---|
-| `gpu-cuda-nvfp4/bonsai-gpu-cuda-nvfp4` | **~1365** | **~90.4** | Short prompt, `-n 16` (2026-05-21) |
-| `gpu-cuda-nvfp4/bonsai-gpu-cuda-nvfp4` | **~1767** | **~65** | **`make run`**, `-p "Hello, how are you?"` (2026-05-28) |
+| Item | Value |
+|---|---|
+| GPU | **sm_120** (RTX 5090; **`make log` GPU column**) |
+| OS | Linux |
+| Model | `Bonsai-8B-Q1_0.gguf` (uploaded to VRAM at startup) |
+| Workload | Long prompt (**130** tokens after ChatML) + **128** decode tokens (**`make log.push`** defaults: **`-n 128 -t 0 -s 42`**) |
+| Metrics | **`prefill_tps` / `decode_tps` / `total_tps`** from **`/tmp/benchmark.log`** (or **`BENCH_LOG_FILE`**) — inference interval only |
+| Reproduce | In **`bonsai-8b/gpu-cuda-nvfp4/`**: **`make log.push`** → **`make log`** |
 
-In 2026-05-21 runs, NVFP4 was about **~1.9×** decode and **~4.7×** prefill tok/s vs Q1_0 on the same GPU.
+| Timestamp | GPU | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
+|---|---|---:|---:|---:|---|
+| 2026-05-28 18:48 | **sm_120** | **5751.92** | **64.12** | **127.80** | 130+128 tokens (**`make log.push`**) |
+
+Do **not** compare this table directly to the **Q1_0 GPU (`make run`, short prompt)** table (different prompt length and token counts).
 
 ### Troubleshooting (NVFP4)
 
