@@ -13,6 +13,7 @@ bonsai-8b/cpu-omp/bonsai-cpu-omp
 bonsai-8b/cpu-blas/bonsai-cpu-blas
 bonsai-8b/gpu-cuda/bonsai-gpu-cuda
 bonsai-8b/gpu-cuda/*.o
+bonsai-8b/gpu-cuda/.build_config.stamp
 bonsai-8b/gpu-cuda/.stamp_bonsai_fp4_*
 bonsai-8b/gpu-cuda/third_party/
 bonsai-8b/gpu-rocm/bonsai-gpu-rocm
