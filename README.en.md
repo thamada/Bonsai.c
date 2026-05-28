@@ -496,7 +496,7 @@ FFN after attention also uses batch kernels; hidden state lives in `x_batch` as 
 
 #### Q1_0 GEMV (`gpu_mm` / `gpu_mm_batch`) — default
 
-Same approach as **`cpu-blas`**. Weights stay **Q1_0 in VRAM** (no upfront dequant). Both **`make run`** (Blackwell **`sm_120a`**, **`BONSAI_FP4=0`**) and **`make run.no-fp4`** (PTX **`compute_86`** JIT) use this path. Only a build with **`BONSAI_FP4=1`** switches linear layers to NVFP4 in the next section.
+Same approach as **`cpu-blas`**. Weights stay **Q1_0 in VRAM** (no upfront dequant). Both **`make run`** (Blackwell **`sm_120a`**, **`BONSAI_FP4=0`**) and **`make run.no-fp4`** (**`BONSAI_FP4=0`**, **`make build` GPU auto-detect**) use this path. **RTX 5090-class GPUs need native `sm_120`** (PTX **`compute_86` JIT breaks inference**). Only a build with **`BONSAI_FP4=1`** switches linear layers to NVFP4 in the next section.
 
 1. Quantize the input vector (or each batch row) to Q8_0 (group size 32) with **`quantize_q8_0_kernel`**.
 2. Run **`mm_q1_0_kernel`** / **`mm_q1_0_batch_kernel`**: `vec_dot_q1_0_q8_0` — dot product of a Q1_0 weight row and Q8_0 activations; 1-bit sign bits combined with Q8_0 int8 products, restored with FP16 scales.
@@ -609,14 +609,14 @@ sudo apt install -y nvidia-cuda-toolkit   # or NVIDIA’s official CUDA Toolkit
 
 | Goal | Command (`bonsai-8b/gpu-cuda/`) | Notes |
 |---|---|---|
-| Generic GPU (PTX JIT, Q1_0) | `make build` / `make run.no-fp4` | PTX `compute_86` + driver JIT |
-| Blackwell + Q1_0 (default) | `make` / `make run` | CUDA 13 + native **`sm_120a`** + **`BONSAI_FP4=0`** (first run may need **sudo**) |
+| Q1_0, no FP4 (GPU auto-detect) | `make build` / `make run.no-fp4` | **`nvidia-smi`** picks **`CUDA_GENCODE`** (RTX 50 → **`sm_120`**, etc.) |
+| Blackwell + Q1_0 (default) | `make` / `make run` | CUDA 13 + native **`sm_120a`** + **`BONSAI_FP4=0`** (first run may need **sudo**; later runs **skip apt**) |
 | Blackwell + NVFP4 | Manual build below | **`make cutlass`** + **`BONSAI_FP4=1`** |
 
 ```bash
 cd bonsai-8b/gpu-cuda
-make run              # default: blackwell (sm_120a, Q1_0) then inference
-# make run.no-fp4     # PTX compute_86 + Q1_0
+make run              # default: blackwell (sm_120a, Q1_0) then inference (skips apt if CUDA 13 present)
+# make run.no-fp4     # build (GPU auto-detect, no FP4) then inference
 ```
 
 Optional NVFP4 on Blackwell:
@@ -632,7 +632,7 @@ Produces **`bonsai-gpu-cuda`**.
 
 After changing **`CUDA_GENCODE`**, **`BONSAI_FP4`**, or **`FA_BR`**, the Makefile uses **`.build_config.stamp`** (contents `CUDA_GENCODE|fp4=…|fa=…`) to force **`kernels.o` / `fp4_*.o`** to rebuild so stale objects are not reused. **`make clean`** removes the stamp as well.
 
-Override **`CUDA_GENCODE`** for your GPU (default for `make run.no-fp4`: PTX `compute_86` + driver JIT):
+**`make build`** / **`run.no-fp4`** auto-select **`CUDA_GENCODE`** / **`FA_BR`** from **`nvidia-smi`** (build log shows `GPU_CCAP` / `CUDA_GENCODE`). Override example:
 
 ```bash
 make build CUDA_GENCODE=arch=compute_90,code=sm_90
@@ -643,7 +643,7 @@ make build CUDA_GENCODE=arch=compute_90,code=sm_90
 ```bash
 cd bonsai-8b/gpu-cuda
 make run PROMPT="Hello"          # Blackwell sm_120a + Q1_0 (default)
-# make run.no-fp4 PROMPT="Hello" # PTX compute_86 + Q1_0
+# make run.no-fp4 PROMPT="Hello" # GPU auto-detect + Q1_0 (no FP4)
 ```
 
 CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
@@ -659,7 +659,7 @@ CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
 | GPU | NVIDIA GeForce RTX 5090 (31 GiB VRAM) |
 | OS | Linux |
 | Model | `Bonsai-8B-Q1_0.gguf` (uploaded to VRAM at startup) |
-| Command | **`make run`** (Blackwell **`sm_120a`**, Q1_0) or **`make run.no-fp4`** (PTX **`compute_86`**, Q1_0). FP4 table is from manual **`BONSAI_FP4=1`** build |
+| Command | **`make run`** (**`sm_120a`**, Q1_0) or **`make run.no-fp4`** (GPU auto-detect, Q1_0). FP4 table is from manual **`BONSAI_FP4=1`** build |
 | Workload | Same as CPU table above (prefill 18 + decode 16 tokens) |
 | Repro | One warmup per configuration, then representative of three runs (prefill / decode from stderr `Prefill complete` / `Decode complete` lines) |
 
@@ -671,23 +671,27 @@ Blackwell (RTX 50 series): **CUDA 13**, native **`sm_120a`**, **`BONSAI_FP4=1`**
 |---|---:|---:|---:|---|
 | `gpu-cuda/bonsai-gpu-cuda` | **~1365** | 0.18 s | **~90.4 tok/s** | stderr shows `GPU: FP4 Tensor Core path enabled` (measured 2026-05-21) |
 
-#### Q1_0 GPU (PTX JIT, `make run.no-fp4`)
+#### Q1_0 GPU (Blackwell native, `make run` / `make run.no-fp4`)
 
-PTX **`compute_86`** + driver JIT, Q1_0 GEMV. From `gpu-cuda/`, `make run.no-fp4` (`make build` only).
+**CUDA 13**, **`sm_120` / `sm_120a`**, **`BONSAI_FP4=0`**, **`FA_BR=32`**. `-p "Hello, how are you?"` (measured 2026-05-28).
 
-| Binary | Prefill tok/s | Decode time | Decode throughput | Notes |
-|---|---:|---:|---:|---|
-| `gpu-cuda/bonsai-gpu-cuda` | **~293** | 0.34 s | **~47.0 tok/s** | Batch prefill, `-use_fast_math` (measured 2026-05-21) |
+| Binary | Prefill tok/s | Decode tok/s | Notes |
+|---|---:|---:|---|
+| `gpu-cuda/bonsai-gpu-cuda` | **~312** | **~47** | **`make run`** (**`sm_120a`**) |
 
-#### Q1_0 GPU (Blackwell native, default `make run`)
+**PTX `compute_86` JIT** is **not supported on RTX 5090** (garbled output). The 2026-05-21 PTX table is for Ampere/Ada reference only.
 
-**CUDA 13**, **`sm_120a`**, **`BONSAI_FP4=0`**, **`FA_BR=32`**. Do **not** compare directly to the PTX table above (different architecture and JIT behavior). No numbers recorded yet.
-
-With the same prompt and `-t 0`, **Q1_0 configurations** matched **`cpu-blas`** output (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`). In the 2026-05-21 runs, **manual `BONSAI_FP4=1`** gave decode **~1.9×** and prefill **~4.7×** higher tok/s than the PTX Q1_0 build.
+With the same prompt and `-t 0`, **Q1_0 configurations** matched **`cpu-blas`** output. In the 2026-05-21 runs, **manual `BONSAI_FP4=1`** gave decode **~1.9×** and prefill **~4.7×** higher tok/s than Q1_0 on the same GPU.
 
 ### Troubleshooting (CUDA build)
 
-**CUDA / `nvcc` not found:** Install CUDA Toolkit and an NVIDIA driver, then rebuild in **`gpu-cuda`**. Older CUDA may not support `-arch=native`; the default builds PTX (`compute_86`) for driver JIT. Set **`CUDA_GENCODE`** for your GPU (see **`gpu-cuda/Makefile`**). If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
+**CUDA / `nvcc` not found:** Install CUDA Toolkit and an NVIDIA driver, then run **`make build`** or **`make run`** (Blackwell) in **`gpu-cuda`**. **RTX 50 series** need **CUDA 13** and native **`sm_120` / `sm_120a`** (do **not** use PTX **`compute_86`**). **`make build`** auto-selects **`CUDA_GENCODE`** via **`nvidia-smi`**.
+
+**Garbled output / `flash_attn … unsupported toolchain`:** On Blackwell, avoid PTX JIT (`CUDA_GENCODE=arch=compute_86,code=compute_86`). Rebuild with **`make clean && make run`** or **`make run.no-fp4`**.
+
+**`make run` runs apt every time:** If CUDA 13 is already installed, later runs skip apt. Force reinstall: **`make blackwell FORCE_CUDA_APT=1`**.
+
+If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
 **Clean:** run **`make clean`** in **`bonsai-8b/gpu-cuda`**, **`bonsai-8b/gpu-rocm`**, or **`bonsai-8b/gpu-rocm-wmma`**.
 
