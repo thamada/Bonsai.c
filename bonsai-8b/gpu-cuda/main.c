@@ -987,7 +987,14 @@ typedef struct {
     double decode_tps;
     double total_tps;
     const char *output;
+    GpuVramProfile vram;
 } BenchLogInfo;
+
+static void write_vram_bytes_line(FILE *f, const char *key, size_t bytes)
+{
+    fprintf(f, "%s=%zu\n", key, bytes);
+    fprintf(f, "%s_mib=%.2f\n", key, (double)bytes / (1024.0 * 1024.0));
+}
 
 static void write_benchmark_log(const BenchLogInfo *info) {
     const char *path = getenv("BENCH_LOG_FILE");
@@ -1030,6 +1037,20 @@ static void write_benchmark_log(const BenchLogInfo *info) {
     fprintf(f, "decode_tps=%.2f\n", info->decode_tps);
     fprintf(f, "total_tps=%.2f\n", info->total_tps);
     fprintf(f, "\n");
+    write_vram_bytes_line(f, "vram_total", info->vram.total_bytes);
+    if (info->vram.device_total_bytes > 0) {
+        write_vram_bytes_line(f, "vram_device_used", info->vram.device_used_bytes);
+        write_vram_bytes_line(f, "vram_device_total", info->vram.device_total_bytes);
+    }
+    fprintf(f, "\n");
+    fprintf(f, "[vram_breakdown]\n");
+    write_vram_bytes_line(f, "vram_weights_q1_embd", info->vram.weights_q1_embd_bytes);
+    write_vram_bytes_line(f, "vram_weights_f32_norm", info->vram.weights_f32_norm_bytes);
+    write_vram_bytes_line(f, "vram_weights_q1_linear", info->vram.weights_q1_linear_bytes);
+    write_vram_bytes_line(f, "vram_kv_cache", info->vram.kv_cache_bytes);
+    write_vram_bytes_line(f, "vram_decode_activations", info->vram.decode_activations_bytes);
+    write_vram_bytes_line(f, "vram_prefill_batch", info->vram.prefill_batch_bytes);
+    fprintf(f, "\n");
     fprintf(f, "--- prompt ---\n");
     fprintf(f, "%s\n", info->prompt_text ? info->prompt_text : "");
     fprintf(f, "--- end prompt ---\n");
@@ -1040,7 +1061,7 @@ static void write_benchmark_log(const BenchLogInfo *info) {
     fclose(f);
 }
 
-static void throughput_summary(const BenchLogInfo *meta,
+static void throughput_summary(const BenchLogInfo *meta, GpuModel *gpu,
                              int n_prefill, double prefill_sec,
                              int n_decode, double decode_sec,
                              double total_sec,
@@ -1064,6 +1085,8 @@ static void throughput_summary(const BenchLogInfo *meta,
     info.decode_tps = decode_tps;
     info.total_tps = total_tps;
     info.output = output ? output : "";
+    if (gpu)
+        gpu_model_vram_profile(gpu, &info.vram);
     write_benchmark_log(&info);
 }
 
@@ -1130,7 +1153,7 @@ static void generate(Model *m, int *prompt, int n_prompt,
     printf("\n\n--- %d prompt tokens + %d generated tokens ---\n", n_prompt, gen);
     printf("--- %.1fs total ---\n", elapsed);
     if (n_prompt > 0 || gen > 0)
-        throughput_summary(meta, n_prompt, prefill_sec, gen, decode_sec, elapsed,
+        throughput_summary(meta, m->gpu, n_prompt, prefill_sec, gen, decode_sec, elapsed,
                            gen_out.data ? gen_out.data : "");
     genbuf_free(&gen_out);
 }

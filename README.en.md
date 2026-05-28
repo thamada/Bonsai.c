@@ -415,7 +415,7 @@ If something fails, check **`bonsai-8b/Makefile`** (**`model` only**) and per-su
 
 ## NVIDIA CUDA implementation (`gpu-cuda`)
 
-**`bonsai-8b/gpu-cuda/` is an appendix outside this repo’s goals** (single C source, minimal dependencies). It uses `main.c` + `kernels.cu` + `gpu.h` with **Q1_0×Q8_0 GEMV only** (no NVFP4 path). It requires **CUDA Toolkit, an NVIDIA driver, and a physical GPU**. For Blackwell **NVFP4 Tensor Core**, see the separate appendix **`gpu-cuda-nvfp4/`**. The reference implementation to read first is **`cpu/main.c`**.
+**`bonsai-8b/gpu-cuda/` is an appendix outside this repo’s goals** (single C source, minimal dependencies). It uses `main.c` + `kernels.cu` + `gpu.h` with **Q1_0×Q8_0 GEMV only** (no NVFP4 path). It requires **CUDA Toolkit, an NVIDIA driver, and a physical GPU**. Use **`make log` / `make log.push`** to record benchmark history in **`gpu-cuda/Makefile`**. After each run, **`BENCH_LOG_FILE`** (default **`/tmp/benchmark.log`**) also records **VRAM breakdown** (**`GpuVramProfile`** / **`gpu_model_vram_profile`**) as key=value fields in addition to tok/s. For Blackwell **NVFP4 Tensor Core**, see the separate appendix **`gpu-cuda-nvfp4/`**. The reference implementation to read first is **`cpu/main.c`**.
 
 It is bundled only because the author **wanted to see how fast CUDA could go**. It does not complement the project’s purpose and is not an official feature for readers. It is easy to misread as part of the main project, so **`gpu-cuda/` is planned to move to a separate repository**. First-time readers can **ignore it**.
 
@@ -427,8 +427,8 @@ What follows is a technical note for anyone curious about GPU speed comparisons.
 bonsai-8b/gpu-cuda/
 ├── Makefile
 ├── main.c
-├── kernels.cu
-└── gpu.h
+├── kernels.cu          # includes gpu_model_vram_profile
+├── gpu.h               # GpuVramProfile / gpu_model_vram_profile
 ```
 
 ### Technical overview
@@ -543,10 +543,13 @@ sudo apt install -y nvidia-cuda-toolkit   # or NVIDIA’s official CUDA Toolkit
 |---|---|---|
 | Build with GPU auto-detect | `make build` | **`nvidia-smi`** picks **`CUDA_GENCODE`** (RTX 50 → **`sm_120`**, etc.) |
 | Blackwell + Q1_0 (default) | `make` / `make run` | CUDA 13 + native **`sm_120a`** (first run may need **sudo**; later runs **skip apt**) |
+| Show benchmark history | `make log` | |
+| Run benchmark and append history | `make log.push` | e.g. `make log.push BENCH_N=64` |
 
 ```bash
 cd bonsai-8b/gpu-cuda
 make run              # default: blackwell (sm_120a, Q1_0) then inference (skips apt if CUDA 13 present)
+# Long-prompt benchmark: make log.push → make log
 ```
 
 Produces **`bonsai-gpu-cuda`**.
@@ -572,6 +575,27 @@ CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
 ./gpu-cuda/bonsai-gpu-cuda Bonsai-8B-Q1_0.gguf -p "Hello" -n 4
 ```
 
+### Benchmark logging (`make log` / `make log.push`)
+
+Same idea as **`gpu-rocm`** / **`gpu-cuda-nvfp4`**: run a **long prompt** (~**130** tokens after ChatML) + **128** decode tokens and append results to **`gpu-cuda/Makefile`**. Column 2 is **`GPU_LABEL`** (compute capability from **`nvidia-smi`**, e.g. **`sm_120`**).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BENCH_PROMPT` | Long English text (in Makefile) | Benchmark prompt |
+| `BENCH_N` | `128` | Max generated tokens (`-n`) |
+| `BENCH_SEED` | `42` | RNG seed (`-s`) |
+| `BENCH_LOG_FILE` | `/tmp/benchmark.log` | key=value log path |
+
+```bash
+cd bonsai-8b/gpu-cuda
+make log.push          # build → benchmark → append one line to Makefile
+make log               # print BENCH_LOG as a table
+```
+
+**Note:** **`make log.push` modifies `gpu-cuda/Makefile`**. Check **`git diff`** before committing. Table **`total_tps`** is **inference only** (VRAM weight upload excluded).
+
+**VRAM fields in `BENCH_LOG_FILE`** (written after each run): **`vram_total`**, **`vram_device_used`** / **`vram_device_total`** (**`cudaMemGetInfo`**, each in **bytes** and **`_mib`**), and a **`[vram_breakdown]`** section (Q1_0 embedding / F32 norm / Q1_0 linear weights / KV / decode activations / prefill batch). **`BENCH_LOG`** in the Makefile stores tok/s only; see **`BENCH_LOG_FILE`** for VRAM breakdown.
+
 ### Reference benchmark (GPU)
 
 | Item | Value |
@@ -583,7 +607,7 @@ CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
 | Workload | Same as CPU table above (prefill 18 + decode 16 tokens) |
 | Repro | One warmup per configuration, then representative of three runs (prefill / decode from stderr `Prefill complete` / `Decode complete` lines) |
 
-#### Q1_0 GPU (Blackwell native, `make run`)
+#### Q1_0 GPU short prompt (Blackwell native, `make run`)
 
 **CUDA 13**, **`sm_120a`**, **`FA_BR=32`**. `-p "Hello, how are you?"` (measured 2026-05-28).
 
@@ -591,9 +615,42 @@ CLI options (`-p`, `-n`, `-t`, `-k`, `-s`, `-l`) match the CPU builds.
 |---|---:|---:|---|
 | `gpu-cuda/bonsai-gpu-cuda` | **~312** | **~47** | **`make run`** (**`sm_120a`**) |
 
+#### Q1_0 GPU long prompt (`make log.push`)
+
+| Item | Value |
+|---|---|
+| GPU | **sm_120** (RTX 5090; **`make log` GPU column**) |
+| Workload | Long prompt (**130** tokens after ChatML) + **128** decode tokens (**`make log.push`** defaults: **`-n 128 -t 0 -s 42`**) |
+| Metrics | **`prefill_tps` / `decode_tps` / `total_tps`** from **`/tmp/benchmark.log`** (or **`BENCH_LOG_FILE`**) — inference interval only |
+| Reproduce | In **`bonsai-8b/gpu-cuda/`**: **`make log.push`** → **`make log`** |
+
+| Timestamp | GPU | Prefill tok/s | Decode tok/s | Total tok/s | Notes |
+|---|---|---:|---:|---:|---|
+| 2026-05-28 17:35 | **sm_120** | **412.61** | **43.12** | **78.58** | 130+128 tokens (**`make log.push`**) |
+| 2026-05-28 17:43 | **sm_120** | **411.64** | **43.16** | **78.62** | same (2nd run) |
+| 2026-05-28 20:51 | **sm_120** | **413.24** | **43.17** | **78.66** | same (3rd run) |
+
+**VRAM breakdown** (above **2026-05-28 20:51** run, 3rd measurement; **`BENCH_LOG_FILE`** **`[vram_breakdown]`**; default **`-l` / `max_seq`**):
+
+| Item | bytes | MiB | Notes |
+|---|---:|---:|---|
+| **`vram_total`** (theoretical sum) | 1,408,171,860 | **1342.94** | Sum of categories below |
+| **`vram_device_used`** | 2,226,388,992 | **2123.25** | **`cudaMemGetInfo`** (may include CUDA runtime overhead) |
+| **`vram_device_total`** | 33,669,513,216 | **32109.75** | Total GPU VRAM |
+| `vram_weights_q1_embd` | 87,361,344 | **83.31** | Q1_0 **`token_embd`** |
+| `vram_weights_f32_norm` | 1,232,896 | **1.18** | F32 norm weights |
+| `vram_weights_q1_linear` | 1,064,109,888 | **1014.81** | Q1_0 linear weights (**`wq`–`down`** + LM head) |
+| `vram_kv_cache` | 150,994,944 | **144.00** | **`kc` / `vc`** (depends on **`-l`**) |
+| `vram_decode_activations` | 792,788 | **0.76** | Single-token decode buffers |
+| `vram_prefill_batch` | 103,680,000 | **98.88** | Prefill batch (**`batch_cap = max_seq`**) |
+
+Linear weights (**~1015 MiB**) dominate theoretical VRAM. KV (**~144 MiB**) scales with **`-l`**. **`vram_device_used`** can exceed **`vram_total`** (driver / CUDA allocation).
+
 **PTX `compute_86` JIT** is **not supported on RTX 5090** (garbled output).
 
-With the same prompt and `-t 0`, **Q1_0 configurations** matched **`cpu-blas`** output. **NVFP4** numbers are in the **`gpu-cuda-nvfp4`** section below.
+Do **not** compare the tables above directly to the **short-prompt** or **NVFP4 long-prompt** tables (different prompt length, token counts, or code path).
+
+With the same prompt and **`-t 0`**, **Q1_0 configurations** produce the same text as **`cpu-blas`** (`Hello! I'm Bonsai, an AI assistant developed by PrismML.`). **NVFP4** numbers are in the **`gpu-cuda-nvfp4`** section below.
 
 ### Troubleshooting (CUDA build)
 
@@ -609,9 +666,9 @@ If you see `[prompt length … exceeds max_seq …]`, increase **`-l`**.
 
 ### Source files to read
 
-6. `bonsai-8b/gpu-cuda/main.c` — host side (GGUF, tokenizer, `generate`, sampling)  
-7. `bonsai-8b/gpu-cuda/kernels.cu` — forward pass, Q1_0 GEMV, Flash Attention  
-8. `bonsai-8b/gpu-cuda/gpu.h` — C API (`gpu_forward_prefill`, etc.)  
+6. `bonsai-8b/gpu-cuda/main.c` — host side (GGUF, tokenizer, `generate`, sampling, **VRAM benchmark log**)  
+7. `bonsai-8b/gpu-cuda/kernels.cu` — forward pass, Q1_0 GEMV, Flash Attention, **`gpu_model_vram_profile`**  
+8. `bonsai-8b/gpu-cuda/gpu.h` — C API (`gpu_forward_prefill`, etc., **`GpuVramProfile`**)  
 
 ---
 
@@ -626,7 +683,7 @@ bonsai-8b/gpu-cuda-nvfp4/
 ├── Makefile
 ├── main.c
 ├── kernels.cu          # linear layers always gpu_mm_fp4 → fp4_bonsai_mm
-├── gpu.h               # adds GpuVramProfile / gpu_model_vram_profile
+├── gpu.h               # GpuVramProfile (NVFP4-specific fields)
 ├── fp4_bonsai.cu / fp4_bonsai.h
 ├── fp4_gemm.cu / fp4_gemm.h
 └── third_party/cutlass/   # make cutlass (CUTLASS_TAG=v4.5.1)
@@ -701,6 +758,23 @@ make log               # print BENCH_LOG as a table
 | 2026-05-28 18:48 | **sm_120** | **5751.92** | **64.12** | **127.80** | 130+128 tokens (**`make log.push`**) |
 | 2026-05-28 20:30 | **sm_120** | **5762.22** | **64.14** | **127.84** | same (2nd run) |
 | 2026-05-28 20:30 | **sm_120** | **5757.93** | **64.20** | **127.96** | same (3rd run) |
+
+**VRAM breakdown** (above **2026-05-28 20:30** run, 3rd measurement; **`BENCH_LOG_FILE`** **`[vram_breakdown]`**; default **`-l` / `max_seq`**):
+
+| Item | bytes | MiB | Notes |
+|---|---:|---:|---|
+| **`vram_total`** (theoretical sum) | 5,975,701,524 | **5698.87** | Sum of categories below |
+| **`vram_device_used`** | 6,752,043,008 | **6439.25** | **`cudaMemGetInfo`** (may include CUDA runtime overhead) |
+| **`vram_device_total`** | 33,669,513,216 | **32109.75** | Total GPU VRAM |
+| `vram_weights_q1_embd` | 87,361,344 | **83.31** | Q1_0 **`token_embd`** |
+| `vram_weights_f32_norm` | 1,232,896 | **1.18** | F32 norm weights |
+| `vram_weights_fp4` | 4,256,464,896 | **4059.28** | NVFP4 linear weight cache (**`wq`–`down`** + LM head) |
+| `vram_kv_cache` | 150,994,944 | **144.00** | **`kc` / `vc`** (depends on **`-l`**) |
+| `vram_decode_activations` | 792,788 | **0.76** | Single-token decode buffers |
+| `vram_prefill_batch` | 103,680,000 | **98.88** | Prefill batch (**`batch_cap = max_seq`**) |
+| `vram_fp4_gemm_scratch` | 1,375,174,656 | **1311.47** | BF16 activations/output + CUTLASS workspace, etc. |
+
+NVFP4 linear cache (**~4059 MiB**) and GEMM scratch (**~1311 MiB**) dominate theoretical VRAM. This is larger than the **Q1_0 path** ( **`gpu-cuda`** long-prompt table, theoretical **~1343 MiB**), but includes Tensor Core GEMM working memory. KV, embedding, and prefill batch are similar to the Q1_0 build.
 
 Do **not** compare this table directly to the **Q1_0 GPU (`make run`, short prompt)** table (different prompt length and token counts).
 
