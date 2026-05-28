@@ -46,6 +46,7 @@ FP4_CXXFLAGS = -std=c++17 --expt-relaxed-constexpr \
 
 FP4_FLAG :=
 FP4_OBJS :=
+FP4_STAMP := .stamp_bonsai_fp4_$(BONSAI_FP4)
 ifneq ($(BONSAI_FP4),0)
 FP4_FLAG  := -DBONSAI_FP4=1
 FP4_OBJS  := fp4_gemm.o fp4_bonsai.o
@@ -67,7 +68,10 @@ build: main.o kernels.o $(FP4_OBJS)
 main.o: main.c gpu.h
 	$(CC) $(CFLAGS) -c main.c -o main.o
 
-kernels.o: kernels.cu gpu.h fp4_bonsai.h
+$(FP4_STAMP):
+	@touch $@
+
+kernels.o: kernels.cu gpu.h fp4_bonsai.h $(FP4_STAMP)
 	$(NVCC) $(NVCCFLAGS) $(FA_BR_FLAG) $(FP4_FLAG) -c kernels.cu -o kernels.o
 
 fp4_gemm.o: fp4_gemm.cu fp4_gemm.h | cutlass
@@ -88,7 +92,7 @@ run.no-fp4: build
 	./bonsai-gpu-cuda "$(MODEL)" -p "$(PROMPT)"
 
 clean:
-	rm -f bonsai-gpu-cuda main.o kernels.o fp4_gemm.o fp4_bonsai.o
+	rm -f bonsai-gpu-cuda main.o kernels.o fp4_gemm.o fp4_bonsai.o .stamp_bonsai_fp4_*
 
 # apt CUDA 11 を削除 → NVIDIA 公式 CUDA 13 をインストール → Blackwell FP4 ビルド
 blackwell:
