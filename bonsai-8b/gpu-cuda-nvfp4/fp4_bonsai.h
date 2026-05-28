@@ -21,6 +21,8 @@ void fp4_bonsai_mm(const void *weight_cache,
                    const float *x, float *y,
                    int M, int n, int d);
 
+size_t fp4_bonsai_vram_bytes(void);
+
 #ifdef __cplusplus
 }
 #endif

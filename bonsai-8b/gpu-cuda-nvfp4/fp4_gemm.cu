@@ -770,6 +770,19 @@ int fp4_weight_cache_K(const void* cache_handle) {
     return cache_handle ? ((const FP4WeightCache*)cache_handle)->K : 0;
 }
 
+size_t fp4_weight_cache_vram_bytes(const void* cache_handle) {
+    if (!cache_handle) return 0;
+    const FP4WeightCache* cache = (const FP4WeightCache*)cache_handle;
+    return (size_t)cache->N * (size_t)cache->K / 2 + (size_t)cache->sf_elems;
+}
+
+size_t fp4_gemm_vram_bytes(void) {
+    if (!g.initialized) return 0;
+    return g.alloc_A_fp4 + g.alloc_B_fp4 + g.alloc_SFA + g.alloc_SFB
+        + g.workspace_size
+        + g.epilogue_cap * sizeof(__nv_bfloat16);
+}
+
 // Free cached weight data
 void fp4_weight_cache_free(void* cache_handle) {
     if (!cache_handle) return;

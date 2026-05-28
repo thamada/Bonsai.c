@@ -19,7 +19,10 @@ const void *fp4_weight_cache_fp4_ptr(const void *cache);
 const void *fp4_weight_cache_sf_ptr(const void *cache);
 int   fp4_weight_cache_N(const void *cache);
 int   fp4_weight_cache_K(const void *cache);
+size_t fp4_weight_cache_vram_bytes(const void *cache);
 void  fp4_weight_cache_free(void *cache);
+
+size_t fp4_gemm_vram_bytes(void);
 
 int  fp4_gemm_run_cached(const void *A_bf16, const void *cache_handle,
                           const void *C_bf16, void *D_bf16,
