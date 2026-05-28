@@ -4,6 +4,16 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-28 15:32:45
+
+**`bonsai-8b/gpu-cuda/Makefile`**: **`nvidia-smi`** から先頭 GPU の compute capability を読み、**`CUDA_GENCODE`** / **`FA_BR`** / **`NVCC`**（Blackwell 時は **`/usr/local/cuda/bin/nvcc`**）を自動設定（**12.0 → `sm_120` + `FA_BR=32`** 等）。**`make build`** / **`run.no-fp4`** はこの検出を使用。**RTX 5090 等で PTX `compute_86` JIT は Flash Attention が壊れ推論が文字化け**するため、Blackwell ではネイティブ **`sm_120` / `sm_120a`** 必須。**`make blackwell`**: **`$(CUDA13_NVCC)` が CUDA 13 以上なら `apt-get update` / `install` をスキップ**（2 回目以降の **`make run`** を高速化）。強制再インストールは **`FORCE_CUDA_APT=1`**。ビルド時に **`GPU_CCAP` / `CUDA_GENCODE` / `FA_BR`** を表示。
+
+**`doc/design.md`**: GPU アーキ自動検出・PTX 非推奨（Blackwell）・**`blackwell` apt スキップ**・ベンチ表（**`sm_120a` Q1_0** 代表値）・ビルド手順・制約・トラブルシュートを追随。
+
+**`README.md` / `README.en.md`**: 付録 **gpu-cuda** のビルド表・ベンチ・トラブルシュートを同上に更新。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-28 15:13:38
 
 **`bonsai-8b/gpu-cuda/main.c`**: **`Bonsai-8B-Q1_0.gguf` 専用**に整理。**Q4_K / Q5_K / IQ2_S / IQ3_S 等**の汎用 CPU 逆量子化・**IQ グリッド表**・**`BlockQ*`** 定義・不要な **`ggml_dtype`** を削除。**`load_weights`** で **`expect_q1_0`** が embedding・各層線形重み・LM head の **`DT_Q1_0`** を要求（**`gpu-rocm/main.c`** と同趣旨）。Q1_0 重みの H2D・Embedding/GEMV は **`kernels.cu`** 側のみ。
