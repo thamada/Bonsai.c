@@ -57,14 +57,16 @@ static __global__ void dequant_q1_0_to_bf16_kernel(
 }
 
 static __global__ void f32_to_bf16_pad_kernel(
-    const float *src, __nv_bfloat16 *dst, int M, int n, int K_pad)
+    const float *src, __nv_bfloat16 *dst, int M_act, int M_pad, int n, int K_pad)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = M * K_pad;
+    int total = M_pad * K_pad;
     if (idx >= total) return;
     int m = idx / K_pad;
     int k = idx - m * K_pad;
-    float v = (k < n) ? src[(size_t)m * n + k] : 0.0f;
+    float v = 0.0f;
+    if (m < M_act && k < n)
+        v = src[(size_t)m * n + k];
     dst[idx] = __float2bfloat16_rn(v);
 }
 
@@ -102,6 +104,27 @@ int fp4_bonsai_init(int max_M, int max_N, int max_K)
     g_max_M = M;
     g_max_N = N;
     g_max_K = K;
+
+    /* 128³ smoke test — catches CUTLASS/workspace misconfig before full model load */
+    {
+        const int tM = 128, tN = 128, tK = 128;
+        __nv_bfloat16 *dev_w = NULL, *dev_act = NULL, *dev_out = NULL;
+        cudaMalloc(&dev_w, (size_t)tN * tK * sizeof(__nv_bfloat16));
+        cudaMalloc(&dev_act, (size_t)tM * tK * sizeof(__nv_bfloat16));
+        cudaMalloc(&dev_out, (size_t)tM * tN * sizeof(__nv_bfloat16));
+        cudaMemset(dev_w, 0, (size_t)tN * tK * sizeof(__nv_bfloat16));
+        cudaMemset(dev_act, 0, (size_t)tM * tK * sizeof(__nv_bfloat16));
+        void *wc = fp4_quantize_weights(dev_w, tN, tK);
+        int rc = wc ? fp4_gemm_run_cached(dev_act, wc, NULL, dev_out, tM, 1.0f, 0.0f) : -1;
+        if (wc) fp4_weight_cache_free(wc);
+        cudaFree(dev_w);
+        cudaFree(dev_act);
+        cudaFree(dev_out);
+        if (rc != 0) {
+            fprintf(stderr, "fp4_bonsai_init: NVFP4 sanity GEMM failed (rc=%d)\n", rc);
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -174,9 +197,8 @@ void fp4_bonsai_mm(const void *weight_cache,
     }
 
     int act_elems = M_pad * K_pad;
-    int out_elems = M_pad * N_pad;
     f32_to_bf16_pad_kernel<<<(act_elems + 255) / 256, 256>>>(
-        x, g_act_bf16, M_pad, n, K_pad);
+        x, g_act_bf16, M, M_pad, n, K_pad);
 
     if (fp4_gemm_run_cached(g_act_bf16, weight_cache, NULL, g_out_bf16,
                             M_pad, 1.0f, 0.0f) != 0) {

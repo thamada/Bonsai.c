@@ -4,6 +4,20 @@
 >   本ドキュメントは変更履歴です。日付はdateコマンドで確認して2026-01-23 12:34:55のように年-月-日 時:分:秒のようにします。
 >   最も最新のものから順に並べて記入します。
 
+## 2026-05-28 18:51:19
+
+**`bonsai-8b/gpu-cuda-nvfp4/`**（新規）: NVFP4 + CUTLASS 経路を **`gpu-cuda`** から分離。**`bonsai-gpu-cuda-nvfp4`**、**`fp4_bonsai.cu`** / **`fp4_gemm.cu`** / **`third_party/cutlass/`**（**`CUTLASS_TAG=v4.5.1`**）。**`kernels.cu`** は線形層を常に **`fp4_bonsai_mm`**（**`#ifdef BONSAI_FP4` なし**）。**`fp4_bonsai.cu`**: 活性化 BF16 パッドで **`M_act`/`M_pad` 分離**（OOB 防止）、起動時 **128³ サニティ GEMM**。**`fp4_gemm.cu`**: 各 GEMM 前 **`fp4_gemm_init`**、workspace 縮小禁止、`beta=0` 時 epilogue `C=nullptr`。**`Makefile`**: compute 12.x 既定 **`sm_120a`**、**`make blackwell`** / **`make cutlass`**。
+
+**`bonsai-8b/gpu-cuda/`**: **`fp4_*`**・CUTLASS・**`BONSAI_FP4`**・**`run.no-fp4`** を削除。**`kernels.cu`** は **Q1_0×Q8_0** のみ。**`make run`** は **Q1_0 + `sm_120a`**（**`make blackwell`**）。
+
+**`.gitignore`**: **`gpu-cuda-nvfp4`** のビルド成果物・**`third_party/`** を追加。
+
+**`doc/design.md`**: ディレクトリ分割・ビルド手順・ベンチ表（**`bonsai-gpu-cuda-nvfp4`**）・実行挙動（**`gpu-cuda-nvfp4`** 節）・制約（CUTLASS v4.5.1）・チェックリストを追随。**`BONSAI_FP4` / `run.no-fp4`** の記述を撤去。
+
+**`README.md` / `README.en.md`**: ディレクトリツリー・付録を **`gpu-cuda`（Q1_0）** と **`gpu-cuda-nvfp4`（NVFP4）** に分割。ビルド・ベンチ・トラブルシュートを追随。
+
+**`doc/ChangeLog`**: 本エントリ。
+
 ## 2026-05-28 15:32:45
 
 **`bonsai-8b/gpu-cuda/Makefile`**: **`nvidia-smi`** から先頭 GPU の compute capability を読み、**`CUDA_GENCODE`** / **`FA_BR`** / **`NVCC`**（Blackwell 時は **`/usr/local/cuda/bin/nvcc`**）を自動設定（**12.0 → `sm_120` + `FA_BR=32`** 等）。**`make build`** / **`run.no-fp4`** はこの検出を使用。**RTX 5090 等で PTX `compute_86` JIT は Flash Attention が壊れ推論が文字化け**するため、Blackwell ではネイティブ **`sm_120` / `sm_120a`** 必須。**`make blackwell`**: **`$(CUDA13_NVCC)` が CUDA 13 以上なら `apt-get update` / `install` をスキップ**（2 回目以降の **`make run`** を高速化）。強制再インストールは **`FORCE_CUDA_APT=1`**。ビルド時に **`GPU_CCAP` / `CUDA_GENCODE` / `FA_BR`** を表示。

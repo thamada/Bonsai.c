@@ -358,9 +358,11 @@ struct FP4GemmState {
     ScaleFactorType* h_SFA;
     ScaleFactorType* h_SFB;
 
-    // CUTLASS workspace
+    // CUTLASS workspace + epilogue stub (get_workspace_size needs valid C/D ptrs)
     uint8_t* d_workspace;
     size_t workspace_size;
+    __nv_bfloat16* d_epilogue;
+    size_t epilogue_cap;
 };
 
 static FP4GemmState g = {};
@@ -378,7 +380,50 @@ static void cleanup() {
     free(g.h_SFA);
     free(g.h_SFB);
     if (g.d_workspace) cudaFree(g.d_workspace);
+    if (g.d_epilogue) cudaFree(g.d_epilogue);
     memset(&g, 0, sizeof(g));
+}
+
+static int ensure_epilogue_buffer(int M, int N)
+{
+    size_t need = (size_t)M * N;
+    if (need <= g.epilogue_cap) return 0;
+    if (g.d_epilogue) cudaFree(g.d_epilogue);
+    g.d_epilogue = nullptr;
+    g.epilogue_cap = 0;
+    cudaError_t err = cudaMalloc(&g.d_epilogue, need * sizeof(__nv_bfloat16));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "fp4_gemm: epilogue alloc %zu: %s\n", need, cudaGetErrorString(err));
+        return -1;
+    }
+    g.epilogue_cap = need;
+    return 0;
+}
+
+static size_t query_workspace_size(int M, int N, int K)
+{
+    auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
+    auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
+    auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1});
+    auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1});
+    auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
+    auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
+    typename Gemm::Arguments args{
+        cutlass::gemm::GemmUniversalMode::kGemm, {M, N, K, 1},
+        {
+            reinterpret_cast<const ElementA::DataType*>(g.d_A_fp4), stride_A,
+            reinterpret_cast<const ElementB::DataType*>(g.d_B_fp4), stride_B,
+            reinterpret_cast<const ScaleFactorType*>(g.d_SFA), layout_SFA,
+            reinterpret_cast<const ScaleFactorType*>(g.d_SFB), layout_SFB
+        },
+        {
+            {1.0f, 0.0f},
+            nullptr,
+            stride_C,
+            reinterpret_cast<ElementD*>(g.d_epilogue), stride_D
+        }
+    };
+    return Gemm::get_workspace_size(args);
 }
 
 // ============================================================================
@@ -400,17 +445,10 @@ static bool buffers_sufficient(int M, int N, int K) {
     size_t need_SFA = cute::size(cute::filter_zeros(layout_SFA));
     size_t need_SFB = cute::size(cute::filter_zeros(layout_SFB));
 
-    // Compute workspace
-    auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1});
-    auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1});
-    auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
-    auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
-    typename Gemm::Arguments args{
-        cutlass::gemm::GemmUniversalMode::kGemm, {M, N, K, 1},
-        {nullptr, stride_A, nullptr, stride_B, nullptr, layout_SFA, nullptr, layout_SFB},
-        {{1.0f, 0.0f}, nullptr, stride_C, nullptr, stride_D}
-    };
-    size_t need_workspace = Gemm::get_workspace_size(args);
+    if ((size_t)M * N > g.epilogue_cap)
+        return false;
+
+    size_t need_workspace = query_workspace_size(M, N, K);
 
     return g.alloc_A_fp4 >= need_A_fp4 &&
            g.alloc_B_fp4 >= need_B_fp4 &&
@@ -464,21 +502,20 @@ int fp4_gemm_init(int M, int N, int K) {
     g.h_SFA = (ScaleFactorType*)calloc(g.sfa_elems, sizeof(ScaleFactorType));
     g.h_SFB = (ScaleFactorType*)calloc(g.sfb_elems, sizeof(ScaleFactorType));
 
-    // Compute workspace size
-    auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1});
-    auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1});
-    auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
-    auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
+    if (ensure_epilogue_buffer(M, N) != 0)
+        return -1;
 
-    typename Gemm::Arguments args{
-        cutlass::gemm::GemmUniversalMode::kGemm, {M, N, K, 1},
-        {nullptr, stride_A, nullptr, stride_B, nullptr, layout_SFA, nullptr, layout_SFB},
-        {{1.0f, 0.0f}, nullptr, stride_C, nullptr, stride_D}
-    };
-
-    g.workspace_size = Gemm::get_workspace_size(args);
+    g.workspace_size = query_workspace_size(M, N, K);
     g.d_workspace = nullptr;
-    if (g.workspace_size > 0) cudaMalloc(&g.d_workspace, g.workspace_size);
+    if (g.workspace_size > 0) {
+        cudaError_t err = cudaMalloc(&g.d_workspace, g.workspace_size);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "fp4_gemm_init: workspace alloc %zu: %s\n",
+                    g.workspace_size, cudaGetErrorString(err));
+            cleanup();
+            return -1;
+        }
+    }
 
     g.M = M; g.N = N; g.K = K;
     g.max_M = M; g.max_N = N; g.max_K = K;
@@ -542,7 +579,10 @@ int fp4_gemm_run(
         },
         {
             {alpha, beta},
-            reinterpret_cast<const ElementC*>(C_bf16 ? C_bf16 : D_bf16), stride_C,
+            (beta != 0.0f && C_bf16)
+                ? reinterpret_cast<const ElementC*>(C_bf16)
+                : nullptr,
+            stride_C,
             reinterpret_cast<ElementD*>(D_bf16), stride_D
         }
     };
@@ -616,7 +656,10 @@ int fp4_gemm_run_host(
         },
         {
             {alpha, beta},
-            reinterpret_cast<const ElementC*>(C_bf16 ? C_bf16 : D_bf16), stride_C,
+            (beta != 0.0f && C_bf16)
+                ? reinterpret_cast<const ElementC*>(C_bf16)
+                : nullptr,
+            stride_C,
             reinterpret_cast<ElementD*>(D_bf16), stride_D
         }
     };
@@ -764,6 +807,10 @@ int fp4_gemm_run_cached(
         fprintf(stderr, "fp4_gemm_run_cached: not initialized (call fp4_gemm_prealloc first)\n");
         return -1;
     }
+    if (fp4_gemm_init(M, N, K) != 0) {
+        fprintf(stderr, "fp4_gemm_run_cached: fp4_gemm_init failed M=%d N=%d K=%d\n", M, N, K);
+        return -1;
+    }
     if (M > g.max_M || N > g.max_N || K > g.max_K) {
         fprintf(stderr, "fp4_gemm_run_cached: M=%d N=%d K=%d exceeds prealloc max_M=%d max_N=%d max_K=%d\n",
                 M, N, K, g.max_M, g.max_N, g.max_K);
@@ -804,20 +851,27 @@ int fp4_gemm_run_cached(
         },
         {
             {alpha, beta},
-            reinterpret_cast<const ElementC*>(C_bf16 ? C_bf16 : D_bf16), stride_C,
+            (beta != 0.0f && C_bf16)
+                ? reinterpret_cast<const ElementC*>(C_bf16)
+                : nullptr,
+            stride_C,
             reinterpret_cast<ElementD*>(D_bf16), stride_D
         }
     };
 
     Gemm gemm;
 
-    auto status = gemm.can_implement(arguments);
-    if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "fp4_gemm_run_cached: can_implement: %s\n", cutlassGetStatusString(status));
-        return -2;
-    }
+    if (ensure_epilogue_buffer(M, N) != 0)
+        return -1;
 
     size_t need_ws = Gemm::get_workspace_size(arguments);
+
+    auto status = gemm.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        fprintf(stderr, "fp4_gemm_run_cached: can_implement(%d,%d,%d): %s\n",
+                M, N, K, cutlassGetStatusString(status));
+        return -2;
+    }
     if (need_ws > g.workspace_size) {
         if (g.d_workspace) cudaFree(g.d_workspace);
         g.d_workspace = nullptr;
@@ -833,6 +887,11 @@ int fp4_gemm_run_cached(
         }
     }
 
+    cudaError_t qerr = cudaGetLastError();
+    if (qerr != cudaSuccess) {
+        fprintf(stderr, "fp4_gemm_run_cached: quantize kernel: %s\n", cudaGetErrorString(qerr));
+        return -1;
+    }
     cudaDeviceSynchronize();
 
     status = gemm.initialize(arguments, g.d_workspace);

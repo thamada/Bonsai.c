@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Bonsai 系 dense デコーダ GGUF — NVIDIA GPU CUDA 版（cuBLAS 不要）。
+ * Bonsai 系 dense デコーダ GGUF — NVIDIA GPU CUDA NVFP4 版（cuBLAS 不要）。
  *
  * 対象: Bonsai-8B-Q1_0.gguf（Q1_0 g128 + F32 norm 等）。テキスト処理のみ。
  * RoPE: llama.cpp の ggml_compute_forward_rope に倣い NeoX 半分ペア配置 + YaRN 系メタを解釈。
@@ -10,10 +10,11 @@
  *   - 重み・KV キャッシュ・活性化は GPU 常駐。起動時に VRAM へアップロード。
  *   - Prefill: 全プロンプトトークンをバッチ並列（gpu_forward_prefill）。
  *   - Decode: 1 トークンずつ gpu_forward。
- *   - 線形層（既定）: Q1_0 重みに対し活性化を Q8_0 化し vec_dot_q1_0_q8_0 CUDA カーネル（gpu_mm）。
+ *   - 線形層: Q1_0 重みを起動時 NVFP4 へ変換し CUTLASS Tensor Core GEMM（gpu_mm）。
  *   - Attention: Flash Attention（online softmax、att 行列非物質化、GQA 対応）。
  *   - サンプリングのみ CPU（logits を D2H コピー）。
- *   - NVFP4 + CUTLASS 経路は gpu-cuda-nvfp4/ を参照。
+ *   - 本ファイル（main.c）からは FP4 を直接呼ばない。GGUF 読み込み後 gpu_model_create 等は
+ *     kernels.cu 経由で線形層が FP4 Tensor Core 処理になる（fp4_bonsai / fp4_gemm + CUTLASS）。
  *
  * チャット: GGUF tokenizer.chat_template（Qwen3）の user + 空 think ブロック付き assistant 開始。
  */
@@ -1010,7 +1011,7 @@ static void write_benchmark_log(const BenchLogInfo *info) {
         return;
     }
 
-    fprintf(f, "# bonsai-gpu-cuda benchmark log\n");
+    fprintf(f, "# bonsai-gpu-cuda-nvfp4 benchmark log\n");
     fprintf(f, "timestamp=%s\n", timestamp);
     fprintf(f, "hostname=%s\n", hostname);
     fprintf(f, "model=%s\n", info->model_path ? info->model_path : "");
